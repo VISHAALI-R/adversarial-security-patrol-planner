@@ -3,658 +3,567 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Adversarial Game-Theoretic Security Patrol Planner</title>
-    <meta name="description" content="State-of-the-art AI Security Patrol Planning & Optimization using Stackelberg Game Theory.">
+    <title>Patrol Planner | Stackelberg Security Game</title>
+    <meta name="description" content="Randomized security patrol planning with Stackelberg equilibrium, linear programming and Monte Carlo evaluation.">
+    <meta name="color-scheme" content="light dark">
+    <script>
+        // Apply the saved theme before first paint to avoid a flash. Storage can be blocked, so guard it.
+        (function () {
+            document.documentElement.classList.add("js");
+            try {
+                var t = localStorage.getItem("patrol-theme");
+                if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+            } catch (e) {}
+        })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
-    <div class="app-container">
-        <!-- Master Header & Command Bar -->
-        <header class="glass-header">
-            <div class="header-top-row">
-                <div class="brand-badge">
-                    <span class="pulse-dot"></span>
-                    <span>Stackelberg Security Operations Center</span>
-                </div>
-                <div class="system-status-pills">
-                    <span class="status-pill online">
-                        <span style="font-size: 0.6rem;">●</span> FASTAPI BACKEND CONNECTED
-                    </span>
-                    <span class="status-pill">
-                        <span>LP SSE SOLVER: READY</span>
-                    </span>
-                    <span class="status-pill">
-                        <span>NODE v20 • VITE 6</span>
-                    </span>
-                </div>
-            </div>
+<a class="skip-link" href="#overviewSection">Skip to content</a>
 
-            <h1>Adversarial Security Patrol Command Console</h1>
-            <p>Mathematical Optimization of Randomized Patrol Policies Against Adaptive Intruders via Stackelberg Equilibrium</p>
-            
-            <div class="master-actions">
-                <button id="btnRunFullEval" class="btn primary-btn btn-pulse">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                    Run Full Evaluation Workflow
+<div class="shell">
+
+    <!-- ========== NAVIGATION RAIL ========== -->
+    <nav class="rail" id="sidebarNav" aria-label="Sections">
+        <div class="rail-brand">
+            <span class="brand-mark" aria-hidden="true"><i class="ph ph-shield-check"></i></span>
+            <span class="brand-text">
+                <strong>Patrol Planner</strong>
+                <small>Stackelberg security game</small>
+            </span>
+        </div>
+
+        <ul class="rail-links">
+            <li><a href="#overviewSection" class="active" data-section="overviewSection"><i class="ph ph-squares-four" aria-hidden="true"></i><span>Overview</span></a></li>
+            <li><a href="#strategySection" data-section="strategySection"><i class="ph ph-path" aria-hidden="true"></i><span>Strategy</span></a></li>
+            <li><a href="#threatSection" data-section="threatSection"><i class="ph ph-crosshair" aria-hidden="true"></i><span>Threat</span></a></li>
+            <li><a href="#simSection" data-section="simSection"><i class="ph ph-play-circle" aria-hidden="true"></i><span>Simulation</span></a></li>
+            <li><a href="#evaluationSection" data-section="evaluationSection"><i class="ph ph-chart-bar" aria-hidden="true"></i><span>Evaluation</span></a></li>
+            <li><a href="#insightsSection" data-section="insightsSection"><i class="ph ph-lightbulb" aria-hidden="true"></i><span>Insights</span></a></li>
+        </ul>
+
+        <div class="rail-foot">
+            <div class="backend-status" id="backendStatus" data-state="checking" role="status">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span id="backendStatusText">Checking backend</span>
+            </div>
+            <button class="icon-btn" id="themeToggle" type="button" aria-label="Toggle colour theme" title="Toggle colour theme">
+                <i class="ph ph-moon" aria-hidden="true"></i>
+            </button>
+        </div>
+    </nav>
+
+    <!-- ========== MAIN ========== -->
+    <main class="main">
+
+        <header class="page-header">
+            <div class="page-title">
+                <h1>Adversarial security patrol planner</h1>
+                <p>Compute a randomized patrol that an observing intruder cannot exploit, then test it against fixed and uniform baselines.</p>
+            </div>
+            <div class="header-actions">
+                <button id="btnRunFullEval" class="btn btn-primary" type="button">
+                    <i class="ph ph-play" aria-hidden="true"></i><span class="btn-label">Run full pipeline</span>
                 </button>
-                <button id="btnRefreshResults" class="btn secondary-btn">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-                    Refresh State
+                <button id="btnRefreshResults" class="btn btn-secondary" type="button">
+                    <i class="ph ph-arrows-clockwise" aria-hidden="true"></i><span class="btn-label">Refresh</span>
                 </button>
-                <button id="btnResetDashboard" class="btn secondary-btn" style="border-color: rgba(239, 68, 68, 0.4); color: #f87171;">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-                    Reset Console
+                <button id="btnResetDashboard" class="btn btn-ghost btn-danger-text" type="button">
+                    <i class="ph ph-arrow-counter-clockwise" aria-hidden="true"></i><span class="btn-label">Reset</span>
                 </button>
             </div>
         </header>
 
-        <!-- Domain Terminology Glossary Ribbon -->
-        <section class="glossary-bar">
-            <div class="glossary-items">
-                <div class="glossary-item">
-                    <span class="glossary-badge">DEFENDER</span>
-                    <span class="tooltip">Security Patrol
-                        <span class="tooltiptext">Security patrol unit protecting campus checkpoints using randomized mixed strategies.</span>
-                    </span>
-                </div>
-                <div class="glossary-item">
-                    <span class="glossary-badge">ATTACKER</span>
-                    <span class="tooltip">Adaptive Intruder
-                        <span class="tooltiptext">Adversary who observes patrol frequencies and targets checkpoints to maximize payoff.</span>
-                    </span>
-                </div>
-                <div class="glossary-item">
-                    <span class="glossary-badge">TARGET</span>
-                    <span class="tooltip">Protected Location
-                        <span class="tooltiptext">Campus checkpoint location with associated asset value and security risk.</span>
-                    </span>
-                </div>
-                <div class="glossary-item">
-                    <span class="glossary-badge">STRATEGY</span>
-                    <span class="tooltip">Patrol Route
-                        <span class="tooltiptext">Sequence of checkpoints visited during a patrol shift respecting travel time constraints.</span>
-                    </span>
-                </div>
-                <div class="glossary-item">
-                    <span class="glossary-badge">SSE</span>
-                    <span class="tooltip">Stackelberg Equilibrium
-                        <span class="tooltiptext">Strong Stackelberg Equilibrium: Optimal mixed strategy computed via Linear Programming.</span>
-                    </span>
-                </div>
-                <div class="glossary-item">
-                    <span class="glossary-badge">ENTROPY</span>
-                    <span class="tooltip">Unpredictability
-                        <span class="tooltiptext">Normalized Shannon entropy quantifying patrol schedule unpredictability.</span>
-                    </span>
-                </div>
+        <ol class="pipeline" id="pipeline" aria-label="Pipeline progress">
+            <li data-step="generate"><span class="step-num">1</span><span class="step-name">Generate routes</span></li>
+            <li data-step="solve"><span class="step-num">2</span><span class="step-name">Solve equilibrium</span></li>
+            <li data-step="analyze"><span class="step-num">3</span><span class="step-name">Profile attacker</span></li>
+            <li data-step="simulate"><span class="step-num">4</span><span class="step-name">Simulate</span></li>
+            <li data-step="benchmark"><span class="step-num">5</span><span class="step-name">Benchmark</span></li>
+        </ol>
+
+        <details class="terms">
+            <summary><i class="ph ph-book-open" aria-hidden="true"></i> Key terms</summary>
+            <dl>
+                <div><dt>Defender</dt><dd>The patrol. It commits to a probability distribution over routes.</dd></div>
+                <div><dt>Attacker</dt><dd>An intruder who observes that distribution and picks the most profitable target.</dd></div>
+                <div><dt>Target</dt><dd>A checkpoint with an asset value, a reward if breached and a penalty if caught.</dd></div>
+                <div><dt>SSE</dt><dd>Strong Stackelberg Equilibrium: the defender's best commitment when the attacker best-responds and breaks ties in the defender's favour.</dd></div>
+                <div><dt>Entropy</dt><dd>Normalized Shannon entropy of the route distribution. 0 is a fixed schedule, 1 is uniform.</dd></div>
+            </dl>
+        </details>
+
+
+        <!-- ========== 1. OVERVIEW ========== -->
+        <section id="overviewSection" class="section">
+            <div class="section-head">
+                <h2>Campus graph</h2>
+                <p>Nodes are checkpoints, edges are corridors with travel time in minutes. Once a strategy is solved, each ring shows how often a node is covered.</p>
             </div>
-        </section>
 
-        <!-- Main Dashboard 2-Column Grid -->
-        <main class="dashboard-grid">
-            <!-- Left Column: Campus Topology Surveillance & Simulation -->
-            <div class="left-col">
-                <!-- Section 1: Campus Topology Surveillance -->
-                <section class="card map-section" id="campusSection">
-                    <div class="card-header-clean">
-                        <h2>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
-                            Campus Surveillance Topology
-                        </h2>
-                        <span class="card-badge">LIVE VECTOR MAP</span>
-                    </div>
-
-                    <div class="canvas-wrapper">
-                        <div class="canvas-hud-top">
-                            <span class="hud-tag">MAP RADAR ACTIVE</span>
-                            <span class="hud-tag" id="hudActiveRoute">ROUTE: UNASSIGNED</span>
-                        </div>
-                        
-                        <canvas id="campusMapCanvas" width="620" height="420"></canvas>
-                        
-                        <div id="mapNodeTooltip" class="map-node-tooltip">
-                            <div id="tooltipTitle" style="font-weight: 700; color: #38bdf8;">--</div>
-                            <div id="tooltipValue" style="color: #94a3b8; font-size: 0.75rem;">--</div>
-                            <div id="tooltipStatus" style="color: #10b981; font-size: 0.75rem;">--</div>
-                        </div>
-
-                        <div class="map-legend">
-                            <span class="legend-item"><span class="color-box node-normal"></span> Checkpoint Node</span>
-                            <span class="legend-item"><span class="color-box node-target"></span> Intruder Target</span>
-                            <span class="legend-item"><span class="color-box node-patrol"></span> Active Patrol Route</span>
-                        </div>
-                    </div>
-                    
-                    <!-- Telemetry Stats Tiles -->
-                    <div class="telemetry-grid">
-                        <div class="telemetry-item">
-                            <span class="telemetry-label">Checkpoints</span>
-                            <span class="telemetry-value" id="statLocations">--</span>
-                        </div>
-                        <div class="telemetry-item">
-                            <span class="telemetry-label">Patrol Corridors</span>
-                            <span class="telemetry-value" id="statRoutes">--</span>
-                        </div>
-                        <div class="telemetry-item">
-                            <span class="telemetry-label">Patrol Units</span>
-                            <span class="telemetry-value" id="statUnits">1</span>
-                        </div>
-                        <div class="telemetry-item" style="grid-column: span 2;">
-                            <span class="telemetry-label">Highest-Risk Target</span>
-                            <span class="telemetry-value" id="statHighestValue" style="color: #f87171;">--</span>
-                        </div>
-                        <div class="telemetry-item">
-                            <span class="telemetry-label">Shift Duration</span>
-                            <span class="telemetry-value" id="statShift" style="color: #38bdf8;">30 min</span>
-                        </div>
-                    </div>
-                </section>
-
-                <!-- Section 6: Attack Simulation Controls & Engine -->
-                <section class="card simulation-controls-section" id="simControlsSection">
-                    <div class="card-header-clean">
-                        <h2>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="m13 2-2 2.5-3-1.5L7 7l-4 1 2.5 3L4 14l3.5 1.5.5 4 3-1.5 2 2.5 2-2.5 3 1.5.5-4 3.5-1.5-1.5-3 2.5-3-4-1-1-4-3 1.5z"/><circle cx="12" cy="12" r="3"/></svg>
-                            Monte Carlo Attack Simulation
-                        </h2>
-                        <span class="card-badge">STOCHASTIC TESTING</span>
-                    </div>
-
-                    <form id="simForm" class="config-grid">
-                        <div class="form-group">
-                            <label for="simRounds">Simulation Rounds</label>
-                            <input type="number" id="simRounds" value="1000" min="10" step="50">
-                        </div>
-                        <div class="form-group">
-                            <label for="simPolicy">Patrol Policy</label>
-                            <select id="simPolicy">
-                                <option value="game_theoretic" selected>Game-Theoretic (Stackelberg)</option>
-                                <option value="uniform_random">Uniform Random</option>
-                                <option value="fixed">Fixed Schedule</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label for="simAttackerType">Attacker Profile</label>
-                            <select id="simAttackerType">
-                                <option value="rational" selected>Rational Attacker (Optimal)</option>
-                                <option value="bounded">Bounded-Rational (&lambda; Softmax)</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label for="simSeed">Random Seed</label>
-                            <input type="number" id="simSeed" value="42">
-                        </div>
-                    </form>
-
-                    <div class="action-buttons">
-                        <button id="btnRunSim" class="btn primary-btn">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                            Run Attack Simulation
+            <div class="panel map-panel reveal">
+                <div class="map-main">
+                    <div class="map-toolbar">
+                        <span class="route-chip" id="hudActiveRoute">No route selected</span>
+                        <button id="btnSamplePatrol" class="btn btn-secondary btn-sm" type="button" disabled>
+                            <i class="ph ph-dice-five" aria-hidden="true"></i><span class="btn-label">Sample a patrol</span>
                         </button>
                     </div>
-                </section>
-            </div>
-
-            <!-- Right Column: Strategy Engine & Optimization -->
-            <div class="right-col">
-                <!-- Section 2: Feasible Patrol Strategies Config & Output -->
-                <section class="card config-section" id="strategiesConfigSection">
-                    <div class="card-header-clean">
-                        <h2>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-                            Patrol Strategy Synthesis
-                        </h2>
-                        <span class="card-badge">CONSTRAINT DFS</span>
-                    </div>
-
-                    <form id="configForm" class="config-grid">
-                        <div class="form-group">
-                            <label for="patrolUnits">Patrol Units</label>
-                            <input type="number" id="patrolUnits" value="1" min="1" step="1">
-                        </div>
-                        <div class="form-group">
-                            <label for="shiftDuration">Shift Duration (mins)</label>
-                            <input type="number" id="shiftDuration" value="30" min="1" step="1">
-                        </div>
-                        <div class="form-group" style="grid-column: span 2;">
-                            <label for="maxCheckpoints">Maximum Checkpoints per Route</label>
-                            <input type="number" id="maxCheckpoints" value="5" min="1" step="1">
-                        </div>
-                    </form>
-
-                    <div class="action-buttons">
-                        <button id="btnGenerate" class="btn primary-btn">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-                            Generate Feasible Strategies
-                        </button>
-                    </div>
-
-                    <!-- Strategy Table Container -->
-                    <div id="strategyTableContainer" style="display: none; max-height: 250px; overflow-y: auto; margin-top: 1.25rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
-                        <table class="strategy-table">
-                            <thead>
-                                <tr>
-                                    <th>ID</th>
-                                    <th>Patrol Route Sequence</th>
-                                    <th>Time</th>
-                                    <th>Checkpoints</th>
-                                </tr>
-                            </thead>
-                            <tbody id="strategyTableBody">
-                            </tbody>
-                        </table>
-                    </div>
-                    <p id="placeholderGen" class="placeholder-text" style="padding: 1.5rem 0; font-size: 0.88rem; color: var(--text-muted); text-align: center;">
-                        Configure patrol parameters and click "Generate Feasible Strategies".
-                    </p>
-                </section>
-
-                <!-- Section 3: Stackelberg Equilibrium Optimization -->
-                <section class="card stackelberg-section" id="stackelbergSection">
-                    <div class="card-header-clean">
-                        <h2>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                            Stackelberg Equilibrium Optimizer
-                        </h2>
-                        <span class="card-badge" style="color: #34d399; background: rgba(16, 185, 129, 0.12);">LINEAR PROGRAMMING</span>
-                    </div>
-
-                    <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1.25rem;">
-                        Solves the Strong Stackelberg Equilibrium (SSE) via Multi-LP optimization, determining the defender's optimal randomized coverage probabilities.
-                    </p>
-                    
-                    <div class="action-buttons" style="margin-bottom: 1.25rem;">
-                        <button id="btnRunStackelberg" class="btn primary-btn" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                            Solve Stackelberg LP
-                        </button>
-                    </div>
-
-                    <div id="stackelbergResultsContainer" style="display: none;">
-                        <div class="metrics-grid" style="grid-template-columns: repeat(3, 1fr); margin-top: 0;">
-                            <div class="metric-card stackelberg-theme">
-                                <h3>Defender Utility</h3>
-                                <p id="stackDefenderUtility" style="color: #34d399;">--</p>
-                            </div>
-                            <div class="metric-card fixed-theme">
-                                <h3>Attacker Utility</h3>
-                                <p id="stackAttackerUtility" style="color: #f87171;">--</p>
-                            </div>
-                            <div class="metric-card random-theme">
-                                <h3>Best Response</h3>
-                                <p id="stackBestResponse" style="color: #fbbf24; font-size: 1.15rem;">--</p>
-                            </div>
-                        </div>
-
-                        <div style="max-height: 200px; overflow-y: auto; margin-top: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
-                            <table class="strategy-table">
-                                <thead>
-                                    <tr>
-                                        <th>Strategy</th>
-                                        <th>Route</th>
-                                        <th style="text-align: right;">Prob</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="stackelbergTableBody">
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <div class="chart-container" style="margin-top: 1.25rem; height: 210px;">
-                            <canvas id="stackelbergChart"></canvas>
+                    <div class="map-stage" id="mapStage">
+                        <canvas id="campusMapCanvas" role="img" aria-label="Campus graph with checkpoints, corridors, patrol route and intruder target"></canvas>
+                        <div id="mapNodeTooltip" class="map-tooltip" role="tooltip">
+                            <div id="tooltipTitle" class="tt-title"></div>
+                            <div id="tooltipValue" class="tt-line"></div>
+                            <div id="tooltipStatus" class="tt-line tt-status"></div>
                         </div>
                     </div>
-                </section>
-
-                <!-- Section 4: Attacker Model Analysis -->
-                <section class="card attacker-config-section" id="attackerSection">
-                    <div class="card-header-clean">
-                        <h2>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                            Attacker Threat Profiling
-                        </h2>
-                        <span class="card-badge" style="color: #f87171; background: rgba(239, 68, 68, 0.12);">ADVERSARY INTEL</span>
-                    </div>
-
-                    <form id="attackerForm" class="config-grid">
-                        <div class="form-group" style="grid-column: span 2;">
-                            <label>Intruder Decision Model</label>
-                            <div class="radio-group-cards">
-                                <label class="radio-card active" id="radioLabelRational">
-                                    <input type="radio" name="attackerType" value="rational" checked style="margin-right: 0.5rem;"> 
-                                    <span><strong>Rational</strong> (Utility Maximizing)</span>
-                                </label>
-                                <label class="radio-card" id="radioLabelBounded">
-                                    <input type="radio" name="attackerType" value="bounded" style="margin-right: 0.5rem;"> 
-                                    <span><strong>Bounded-Rational</strong> (&lambda; Softmax)</span>
-                                </label>
-                            </div>
-                        </div>
-
-                        <div class="form-group" id="lambdaInputGroup" style="display: none; grid-column: span 2;">
-                            <label for="lambdaVal">Rationality Parameter (&lambda;) <span id="lambdaDisplay" style="color: var(--accent-cyan); font-family: 'JetBrains Mono', monospace;">1.0</span></label>
-                            <input type="number" id="lambdaVal" value="1.0" min="0" step="0.1">
-                        </div>
-                    </form>
-
-                    <p id="attackerExplanation" style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem; font-style: italic;">
-                        "The attacker perfectly evaluates defender coverage and targets the checkpoint offering the maximum expected utility."
-                    </p>
-
-                    <div class="action-buttons">
-                        <button id="btnAnalyzeAttacker" class="btn secondary-btn">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                            Analyze Threat Response
-                        </button>
-                    </div>
-
-                    <!-- Attacker Output Section -->
-                    <div id="attackerResultsSection" style="display: none; margin-top: 1.5rem;">
-                        <div id="rationalResults" style="display: none;">
-                            <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); padding: 1rem; border-radius: var(--radius-sm); margin-bottom: 1rem;">
-                                <div style="font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: #f87171; font-weight: 700;">PRIMARY THREAT TARGET</div>
-                                <div style="font-family: 'Outfit', sans-serif; font-size: 1.5rem; font-weight: 800; color: #fff; margin: 0.3rem 0;" id="bestResponseTarget">--</div>
-                                <div style="color: var(--text-secondary); font-size: 0.82rem;">Expected Attacker Utility: <span id="bestResponseUtility" style="color: #f87171; font-weight: 700;">--</span></div>
-                            </div>
-                        </div>
-
-                        <div id="attackerTableContainer" style="max-height: 180px; overflow-y: auto; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
-                            <table class="strategy-table">
-                                <thead>
-                                    <tr>
-                                        <th>Protected Location</th>
-                                        <th style="text-align: right;" id="attackerTableMetricHeader">Expected Utility</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="attackerTableBody">
-                                </tbody>
-                            </table>
-                        </div>
-                        
-                        <div class="chart-container" style="margin-top: 1.25rem; height: 200px;">
-                            <canvas id="attackerChart"></canvas>
-                        </div>
-                    </div>
-                </section>
-
-                <!-- Section 5: Baseline Strategy Comparison -->
-                <section class="card comparison-section" id="comparisonSection" style="display: none;">
-                    <div class="card-header-clean">
-                        <h2>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-                            Patrol Strategy Comparison
-                        </h2>
-                        <span class="card-badge">3 POLICIES</span>
-                    </div>
-                    
-                    <div style="margin-bottom: 1rem;">
-                        <label for="fixedStrategySelect" style="font-size: 0.82rem; margin-bottom: 0.35rem;">Select Reference Fixed Route:</label>
-                        <select id="fixedStrategySelect" style="width: 100%;">
-                        </select>
-                    </div>
-
-                    <div id="baselineTableContainer" style="overflow-x: auto; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
-                        <table class="strategy-table">
-                            <thead>
-                                <tr id="baselineTableHeaderRow">
-                                    <th>Policy</th>
-                                </tr>
-                            </thead>
-                            <tbody id="baselineTableBody">
-                            </tbody>
-                        </table>
-                    </div>
-                    
-                    <div class="chart-container" style="margin-top: 1.25rem; height: 220px;">
-                        <canvas id="baselineChart"></canvas>
-                    </div>
-                </section>
-
-                <!-- Simulation Real-Time Results -->
-                <section class="card sim-results-section" id="simResultsSection" style="display: none;">
-                    <div class="card-header-clean">
-                        <h2>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                            Simulation Output
-                        </h2>
-                        <span class="card-badge">LIVE RESULTS</span>
-                    </div>
-
-                    <div class="metrics-grid" style="grid-template-columns: repeat(2, 1fr); margin-top: 0;">
-                        <div class="metric-card">
-                            <h3>Total Infiltration Attempts</h3>
-                            <p id="simTotalRounds">--</p>
-                        </div>
-                        <div class="metric-card stackelberg-theme">
-                            <h3>Intercepted Attacks</h3>
-                            <p id="simDetected" style="color: #34d399;">--</p>
-                        </div>
-                        <div class="metric-card fixed-theme">
-                            <h3>Breached Checkpoints</h3>
-                            <p id="simSuccessful" style="color: #f87171;">--</p>
-                        </div>
-                        <div class="metric-card stackelberg-theme">
-                            <h3>Detection Rate</h3>
-                            <p id="simDetectionProb" style="color: #38bdf8;">--</p>
-                        </div>
-                    </div>
-
-                    <h3 style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin: 1.25rem 0 0.5rem 0;">
-                        Recent Encounters Feed
-                    </h3>
-                    <div style="max-height: 200px; overflow-y: auto; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
-                        <table class="strategy-table">
-                            <thead>
-                                <tr>
-                                    <th>Round</th>
-                                    <th>Patrol</th>
-                                    <th>Target</th>
-                                    <th>Status</th>
-                                    <th style="text-align: right;">Payoff</th>
-                                </tr>
-                            </thead>
-                            <tbody id="simLogTableBody">
-                            </tbody>
-                        </table>
-                    </div>
-                </section>
-            </div>
-        </main>
-
-        <!-- Section 7: Statistical Evaluation & Benchmark (Full Width) -->
-        <section class="card evaluation-section" id="evaluationSection">
-            <div class="card-header-clean">
-                <h2>
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                    Multi-Experiment Performance Evaluation & Statistical Benchmark
-                </h2>
-                <span class="card-badge" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8;">EMPIRICAL VALIDATION</span>
-            </div>
-            
-            <form id="evaluationForm" class="config-grid" style="grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.25rem;">
-                <div class="form-group">
-                    <label for="evalRounds">Rounds / Experiment</label>
-                    <input type="number" id="evalRounds" value="1000" min="10" step="50">
-                </div>
-                <div class="form-group">
-                    <label for="evalExperiments">Independent Trials</label>
-                    <input type="number" id="evalExperiments" value="10" min="1" max="50">
-                </div>
-                <div class="form-group">
-                    <label for="evalLambda">Intruder &lambda; (Softmax)</label>
-                    <input type="number" id="evalLambda" value="1.0" min="0.1" step="0.1">
-                </div>
-                <div class="form-group">
-                    <label for="evalSeed">Synchronized Seed</label>
-                    <input type="number" id="evalSeed" value="42">
-                </div>
-            </form>
-            
-            <div class="action-buttons" style="margin-bottom: 1.5rem;">
-                <button id="btnRunEvaluation" class="btn primary-btn">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-                    Execute Empirical Benchmark
-                </button>
-            </div>
-
-            <div id="evalResultsContainer" style="display: none;">
-                <div class="eval-tabs">
-                    <button id="tabRationalBtn" class="eval-tab active">Rational Attacker Scenario</button>
-                    <button id="tabBoundedBtn" class="eval-tab">Bounded-Rational Attacker Scenario</button>
-                </div>
-
-                <!-- Best Strategy Scorecards -->
-                <div class="indicators-grid">
-                    <div class="indicator-card">
-                        <h4>HIGHEST DETECTION RATE</h4>
-                        <div class="val" id="indBestDetection">--</div>
-                        <div class="sub" id="indBestDetectionVal">--</div>
-                    </div>
-                    <div class="indicator-card">
-                        <h4>OPTIMAL DEFENDER UTILITY</h4>
-                        <div class="val" id="indBestUtility">--</div>
-                        <div class="sub" id="indBestUtilityVal">--</div>
-                    </div>
-                    <div class="indicator-card">
-                        <h4>MAX PATROL UNPREDICTABILITY</h4>
-                        <div class="val" id="indMostUnpredictable">--</div>
-                        <div class="sub" id="indMostUnpredictableVal">--</div>
-                    </div>
-                </div>
-
-                <!-- Performance Comparison Table with Wilson CIs -->
-                <div id="evalTableContainer" style="overflow-x: auto; margin-bottom: 1.5rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
-                    <table class="strategy-table">
-                        <thead>
-                            <tr>
-                                <th>Patrol Policy</th>
-                                <th style="text-align: right;">Detection Probability (95% Wilson CI)</th>
-                                <th style="text-align: right;">Attack Success Rate</th>
-                                <th style="text-align: right;">Defender Utility</th>
-                                <th style="text-align: right;">Attacker Utility</th>
-                                <th style="text-align: right;">Unpredictability (H/ln N)</th>
-                            </tr>
-                        </thead>
-                        <tbody id="evalTableBody">
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- 4 Polished Evaluation Visualizers Grid -->
-                <div class="charts-grid">
-                    <div class="chart-card">
-                        <h3>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
-                            Detection Probability (% — Higher is Better)
-                        </h3>
-                        <div class="chart-container">
-                            <canvas id="chartDetection"></canvas>
-                        </div>
-                    </div>
-
-                    <div class="chart-card">
-                        <h3>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2"><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/></svg>
-                            Attack Success Rate (% — Lower is Better)
-                        </h3>
-                        <div class="chart-container">
-                            <canvas id="chartSuccess"></canvas>
-                        </div>
-                    </div>
-
-                    <div class="chart-card">
-                        <h3>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                            Expected Defender Utility (Payoff — Higher is Better)
-                        </h3>
-                        <div class="chart-container">
-                            <canvas id="chartDefenderUtility"></canvas>
-                        </div>
-                    </div>
-
-                    <div class="chart-card">
-                        <h3>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-                            Schedule Unpredictability (Normalized Shannon Entropy)
-                        </h3>
-                        <div class="chart-container">
-                            <canvas id="chartUnpredictability"></canvas>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Section 8: Security Insights -->
-        <section class="card insights-section" id="insightsSection">
-            <div class="card-header-clean">
-                <h2>
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                    Game-Theoretic Security Analysis
-                </h2>
-                <span class="card-badge">THEORETICAL FRAMEWORK</span>
-            </div>
-
-            <div id="insightsContainer">
-                <div class="insight-box fixed">
-                    <strong style="color: #f87171;">1. Fixed Schedule Patrol (Zero Entropy):</strong>
-                    <p style="margin-top: 0.3rem; color: var(--text-secondary); font-size: 0.88rem;">
-                        Repeatedly follows a deterministic route ($H = 0$). An observant adversary can exploit this static schedule with 100% certainty, targeting undefended checkpoints at zero risk.
-                    </p>
-                </div>
-                <div class="insight-box uniform">
-                    <strong style="color: #fbbf24;">2. Uniform Random Patrol (Maximum Entropy):</strong>
-                    <p style="margin-top: 0.3rem; color: var(--text-secondary); font-size: 0.88rem;">
-                        Spreads probabilities equally across all feasible routes. While maximizing schedule unpredictability, it blindly treats low-value corridors with equal priority to critical infrastructure.
-                    </p>
-                </div>
-                <div class="insight-box game">
-                    <strong style="color: #34d399;">3. Game-Theoretic Stackelberg Patrol (Equilibrium Solution):</strong>
-                    <p style="margin-top: 0.3rem; color: var(--text-secondary); font-size: 0.88rem;">
-                        Formulates the security interaction as a Stackelberg game. By solving Multiple Linear Programs, it allocates randomized coverage precisely weighted by asset values and anticipated attacker best responses.
-                    </p>
-                </div>
-                <div id="dynamicInsightsBox" style="background: rgba(14, 165, 233, 0.08); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: var(--radius-sm); padding: 1.25rem; margin-top: 1rem;">
-                    <h3 style="font-size: 0.95rem; color: #38bdf8; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-                        Empirical Benchmark Summary
-                    </h3>
-                    <p id="insightTextDetection" style="font-size: 0.88rem; color: #e2e8f0; margin-bottom: 0.3rem;">Run empirical benchmark to calculate statistically verified detection metrics.</p>
-                    <p id="insightTextSuccess" style="font-size: 0.88rem; color: #e2e8f0; margin-bottom: 0.3rem;">Run empirical benchmark to calculate attack breach ratios.</p>
-                    <p id="insightTextUnpred" style="font-size: 0.88rem; color: #e2e8f0;">Run empirical benchmark to calculate policy Shannon entropy.</p>
-                </div>
-            </div>
-        </section>
-
-        <!-- Section 9: Executive Recommendation -->
-        <section class="card recommendation-section" id="recommendationSection">
-            <div class="recommendation-card">
-                <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1.25rem; flex-wrap: wrap;">
-                    <span class="badge-tag badge-detected" style="font-size: 0.85rem; padding: 0.4rem 1rem;">
-                        OPTIMAL PATROL POLICY IDENTIFIED
-                    </span>
-                    <h3 id="recStrategyTitle" style="margin: 0; color: #34d399; font-family: 'Outfit', sans-serif; font-size: 1.4rem;">
-                        Game-Theoretic Stackelberg Patrol
-                    </h3>
-                </div>
-                <p id="recStrategyText" style="font-size: 0.95rem; line-height: 1.6; color: #e2e8f0;">
-                    Based on multi-experiment stochastic benchmarking, the Game-Theoretic Stackelberg policy is recommended for deployment. It provides mathematically optimal coverage of high-value campus checkpoints while maintaining strategic unpredictability.
-                </p>
-                <div id="recTradeoffsBox" style="margin-top: 1.25rem; background: rgba(8, 15, 32, 0.7); border: 1px solid var(--border-subtle); padding: 1.25rem; border-radius: var(--radius-sm); font-size: 0.88rem; color: #cbd5e1;">
-                    <strong style="color: #38bdf8;">Deployment Rationale & Operational Trade-offs:</strong>
-                    <ul style="margin-top: 0.5rem; padding-left: 1.2rem; line-height: 1.6;">
-                        <li><strong>High Security Payoff:</strong> Prioritizes surveillance of critical assets (Server Room, Laboratory) to minimize intruder utility.</li>
-                        <li><strong>Controlled Randomization:</strong> Retains sufficient entropy to thwart adversary surveillance without diluting protection over secondary locations.</li>
+                    <ul class="map-legend">
+                        <li><span class="swatch sw-node"></span>Checkpoint</li>
+                        <li><span class="swatch sw-patrol"></span>Active patrol route</li>
+                        <li><span class="swatch sw-threat"></span>Intruder target</li>
+                        <li><span class="swatch sw-cover"></span>Coverage ring</li>
                     </ul>
                 </div>
+
+                <dl class="telemetry">
+                    <div><dt>Checkpoints</dt><dd id="statLocations">-</dd></div>
+                    <div><dt>Corridors</dt><dd id="statRoutes">-</dd></div>
+                    <div><dt>Patrol units</dt><dd id="statUnits">1</dd></div>
+                    <div><dt>Shift length</dt><dd id="statShift">30 min</dd></div>
+                    <div class="tele-wide"><dt>Highest-value target</dt><dd id="statHighestValue" class="tele-risk">-</dd></div>
+                </dl>
             </div>
         </section>
-    </div>
-    
-    <script src="script.js"></script>
+
+
+        <!-- ========== 2. STRATEGY ========== -->
+        <section id="strategySection" class="section">
+            <div class="section-head">
+                <h2>Strategy engine</h2>
+                <p>Enumerate every feasible route within the shift, then solve for the probabilities that leave the attacker the least to gain.</p>
+            </div>
+
+            <div class="grid-2">
+                <div class="panel reveal" id="strategiesConfigSection">
+                    <div class="panel-head">
+                        <h3>Feasible routes</h3>
+                        <span class="badge">DFS with time limit</span>
+                    </div>
+
+                    <form id="configForm" class="form-grid" onsubmit="return false">
+                        <div class="field">
+                            <label for="shiftDuration">Shift duration (min)</label>
+                            <input type="number" id="shiftDuration" value="30" min="1" step="1">
+                            <small>Total travel time allowed per route.</small>
+                        </div>
+                        <div class="field">
+                            <label for="maxCheckpoints">Max checkpoints per route</label>
+                            <input type="number" id="maxCheckpoints" value="5" min="1" step="1">
+                            <small>Routes never revisit a node.</small>
+                        </div>
+                        <div class="field field-wide">
+                            <label for="patrolUnits">Patrol units</label>
+                            <input type="number" id="patrolUnits" value="1" min="1" step="1" disabled aria-describedby="unitsHint">
+                            <small id="unitsHint">The solver models a single patrol, so this is fixed at 1.</small>
+                        </div>
+                    </form>
+
+                    <div class="actions">
+                        <button id="btnGenerate" class="btn btn-primary" type="button">
+                            <i class="ph ph-list-magnifying-glass" aria-hidden="true"></i><span class="btn-label">Generate routes</span>
+                        </button>
+                    </div>
+
+                    <div id="strategyEmpty" class="empty">
+                        <span class="empty-icon"><i class="ph ph-path" aria-hidden="true"></i></span>
+                        <p><strong>No routes yet</strong>Set the shift length and generate the feasible routes. Solving starts automatically.</p>
+                    </div>
+                    <div id="strategyResult" class="result" hidden>
+                        <p class="result-meta"><span id="strategyCount">0</span> routes. Select a row to draw it on the map.</p>
+                        <div class="table-wrap">
+                            <table class="tbl">
+                                <thead><tr><th>ID</th><th>Route</th><th class="num">Time</th><th class="num">Nodes</th></tr></thead>
+                                <tbody id="strategyTableBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel reveal" id="stackelbergSection">
+                    <div class="panel-head">
+                        <h3>Stackelberg equilibrium</h3>
+                        <span class="badge badge-good">Multiple LPs</span>
+                    </div>
+                    <p class="panel-note">One linear program per candidate target: maximize the defender's payoff subject to that target being the attacker's best response. The best of them is the SSE.</p>
+
+                    <div class="actions">
+                        <button id="btnRunStackelberg" class="btn btn-primary" type="button">
+                            <i class="ph ph-function" aria-hidden="true"></i><span class="btn-label">Solve equilibrium</span>
+                        </button>
+                    </div>
+
+                    <div id="stackEmpty" class="empty">
+                        <span class="empty-icon"><i class="ph ph-function" aria-hidden="true"></i></span>
+                        <p><strong>Not solved</strong>The optimal route probabilities appear here after you generate routes.</p>
+                    </div>
+                    <div id="stackelbergResultsContainer" class="result" hidden>
+                        <dl class="kpis kpis-3">
+                            <div><dt>Defender utility</dt><dd id="stackDefenderUtility" class="c-good">-</dd></div>
+                            <div><dt>Attacker utility</dt><dd id="stackAttackerUtility" class="c-bad">-</dd></div>
+                            <div><dt>Attacker's best response</dt><dd id="stackBestResponse" class="kpi-text">-</dd></div>
+                        </dl>
+                        <div class="table-wrap table-short">
+                            <table class="tbl">
+                                <thead><tr><th>Route</th><th>Path</th><th class="num">Probability</th></tr></thead>
+                                <tbody id="stackelbergTableBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="chart-box chart-sm"><canvas id="stackelbergChart"></canvas></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+
+        <!-- ========== 3. THREAT ========== -->
+        <section id="threatSection" class="section">
+            <div class="section-head">
+                <h2>Threat analysis</h2>
+                <p>See which target a rational or bounded-rational intruder picks against the current patrol, and how the three policies spread their probability.</p>
+            </div>
+
+            <div class="grid-2 grid-2-even">
+                <div class="panel reveal" id="attackerSection">
+                    <div class="panel-head">
+                        <h3>Attacker profile</h3>
+                        <span class="badge badge-bad">Adversary</span>
+                    </div>
+
+                    <form id="attackerForm" class="form-grid" onsubmit="return false">
+                        <fieldset class="field field-wide seg-field">
+                            <legend>Decision model</legend>
+                            <div class="seg">
+                                <label class="seg-opt active" id="radioLabelRational">
+                                    <input type="radio" name="attackerType" value="rational" checked>
+                                    <span><strong>Rational</strong><small>Always the best target</small></span>
+                                </label>
+                                <label class="seg-opt" id="radioLabelBounded">
+                                    <input type="radio" name="attackerType" value="bounded">
+                                    <span><strong>Bounded</strong><small>Softmax with &lambda;</small></span>
+                                </label>
+                            </div>
+                        </fieldset>
+
+                        <div class="field field-wide" id="lambdaInputGroup" hidden>
+                            <label for="lambdaVal">Rationality &lambda; <output id="lambdaDisplay" for="lambdaVal">1.0</output></label>
+                            <input type="number" id="lambdaVal" value="1.0" min="0.1" step="0.1">
+                            <small>Low values approach random choice, high values approach the rational attacker.</small>
+                        </div>
+                    </form>
+
+                    <p id="attackerExplanation" class="panel-note">The intruder evaluates the patrol's coverage and attacks the checkpoint with the highest expected utility.</p>
+
+                    <div class="actions">
+                        <button id="btnAnalyzeAttacker" class="btn btn-secondary" type="button">
+                            <i class="ph ph-magnifying-glass" aria-hidden="true"></i><span class="btn-label">Analyze response</span>
+                        </button>
+                    </div>
+
+                    <div id="attackerEmpty" class="empty">
+                        <span class="empty-icon"><i class="ph ph-crosshair" aria-hidden="true"></i></span>
+                        <p><strong>No analysis yet</strong>Run the analysis to see the intruder's choice. The map will mark the target.</p>
+                    </div>
+                    <div id="attackerResultsSection" class="result" hidden>
+                        <div id="rationalResults" class="callout callout-bad" hidden>
+                            <span class="callout-label">Primary threat</span>
+                            <strong id="bestResponseTarget" class="callout-value">-</strong>
+                            <span class="callout-sub">Expected attacker utility <b id="bestResponseUtility">-</b></span>
+                        </div>
+                        <div class="table-wrap table-short">
+                            <table class="tbl">
+                                <thead><tr><th>Location</th><th class="num" id="attackerTableMetricHeader">Expected utility</th></tr></thead>
+                                <tbody id="attackerTableBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="chart-box chart-sm"><canvas id="attackerChart"></canvas></div>
+                    </div>
+                </div>
+
+                <div class="panel reveal" id="comparisonSection">
+                    <div class="panel-head">
+                        <h3>Coverage by policy</h3>
+                        <span class="badge">3 policies</span>
+                    </div>
+                    <p class="panel-note">Share of patrols that pass through each target. This is what the attacker observes, and they pick the weakest spot. The route chosen below is also used by the fixed schedule in the simulation and benchmark.</p>
+
+                    <div class="field">
+                        <label for="fixedStrategySelect">Route for the fixed schedule</label>
+                        <select id="fixedStrategySelect" disabled><option>Generate routes first</option></select>
+                    </div>
+
+                    <div id="comparisonEmpty" class="empty">
+                        <span class="empty-icon"><i class="ph ph-chart-bar-horizontal" aria-hidden="true"></i></span>
+                        <p><strong>Nothing to compare</strong>Fixed, uniform and game-theoretic probabilities appear once routes are solved.</p>
+                    </div>
+                    <div id="comparisonResult" class="result" hidden>
+                        <div class="table-wrap">
+                            <table class="tbl tbl-dense">
+                                <thead><tr id="baselineTableHeaderRow"><th>Target</th><th class="num">Value</th><th class="num">Fixed</th><th class="num">Uniform</th><th class="num">Game-theoretic</th></tr></thead>
+                                <tbody id="baselineTableBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="chart-box chart-md"><canvas id="baselineChart"></canvas></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+
+        <!-- ========== 4. SIMULATION ========== -->
+        <section id="simSection" class="section">
+            <div class="section-head">
+                <h2>Monte Carlo simulation</h2>
+                <p>Replay the game round by round: sample a patrol, let the attacker choose, record whether the attack was caught.</p>
+            </div>
+
+            <div class="grid-2 grid-2-sim">
+                <div class="panel reveal" id="simControlsSection">
+                    <div class="panel-head">
+                        <h3>Controls</h3>
+                    </div>
+
+                    <form id="simForm" class="form-grid" onsubmit="return false">
+                        <div class="field">
+                            <label for="simRounds">Rounds</label>
+                            <input type="number" id="simRounds" value="1000" min="10" step="50">
+                        </div>
+                        <div class="field">
+                            <label for="simSeed">Random seed</label>
+                            <input type="number" id="simSeed" value="42">
+                        </div>
+                        <div class="field field-wide">
+                            <label for="simPolicy">Patrol policy</label>
+                            <select id="simPolicy">
+                                <option value="game_theoretic" selected>Game-theoretic (Stackelberg)</option>
+                                <option value="uniform_random">Uniform random</option>
+                                <option value="fixed">Fixed schedule</option>
+                            </select>
+                        </div>
+                        <div class="field field-wide">
+                            <label for="simAttackerType">Attacker</label>
+                            <select id="simAttackerType">
+                                <option value="rational" selected>Rational</option>
+                                <option value="bounded">Bounded-rational</option>
+                            </select>
+                            <small>Bounded-rational uses the &lambda; set under Threat analysis.</small>
+                        </div>
+                    </form>
+
+                    <div class="actions">
+                        <button id="btnRunSim" class="btn btn-primary" type="button">
+                            <i class="ph ph-play" aria-hidden="true"></i><span class="btn-label">Run simulation</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="panel reveal" id="simResultsSection">
+                    <div class="panel-head">
+                        <h3>Results</h3>
+                    </div>
+
+                    <div id="simEmpty" class="empty">
+                        <span class="empty-icon"><i class="ph ph-hourglass-medium" aria-hidden="true"></i></span>
+                        <p><strong>No run yet</strong>Choose a policy and an attacker, then run the simulation.</p>
+                    </div>
+
+                    <div id="simResult" class="result" hidden>
+                        <dl class="kpis kpis-3">
+                            <div><dt>Rounds</dt><dd id="simTotalRounds">-</dd></div>
+                            <div><dt>Intercepted</dt><dd id="simDetected" class="c-good">-</dd></div>
+                            <div><dt>Breached</dt><dd id="simSuccessful" class="c-bad">-</dd></div>
+                            <div><dt>Detection rate</dt><dd id="simDetectionProb">-</dd></div>
+                            <div><dt>Defender payoff</dt><dd id="simDefUtil">-</dd></div>
+                            <div><dt>Attacker payoff</dt><dd id="simAttUtil">-</dd></div>
+                        </dl>
+
+                        <div class="split-bar" id="simSplit" aria-hidden="true">
+                            <span class="split-good"></span><span class="split-bad"></span>
+                        </div>
+
+                        <h4 class="mini-title">Last 10 encounters</h4>
+                        <div class="table-wrap table-short">
+                            <table class="tbl">
+                                <thead><tr><th>Round</th><th>Route</th><th>Target</th><th>Outcome</th><th class="num">Defender payoff</th></tr></thead>
+                                <tbody id="simLogTableBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+
+        <!-- ========== 5. EVALUATION ========== -->
+        <section id="evaluationSection" class="section">
+            <div class="section-head">
+                <h2>Performance evaluation</h2>
+                <p>Independent trials per policy with synchronized seeds and 95% Wilson intervals on detection probability.</p>
+            </div>
+
+            <div class="panel reveal">
+                <form id="evaluationForm" class="form-row" onsubmit="return false">
+                    <div class="field">
+                        <label for="evalRounds">Rounds per trial</label>
+                        <input type="number" id="evalRounds" value="1000" min="10" step="50">
+                    </div>
+                    <div class="field">
+                        <label for="evalExperiments">Trials</label>
+                        <input type="number" id="evalExperiments" value="10" min="1" max="50">
+                    </div>
+                    <div class="field">
+                        <label for="evalLambda">Bounded attacker &lambda;</label>
+                        <input type="number" id="evalLambda" value="1.0" min="0.1" step="0.1">
+                    </div>
+                    <div class="field">
+                        <label for="evalSeed">Base seed</label>
+                        <input type="number" id="evalSeed" value="42">
+                    </div>
+                    <button id="btnRunEvaluation" class="btn btn-primary" type="button">
+                        <i class="ph ph-gauge" aria-hidden="true"></i><span class="btn-label">Run benchmark</span>
+                    </button>
+                </form>
+
+                <div id="evalEmpty" class="empty empty-wide">
+                    <span class="empty-icon"><i class="ph ph-chart-bar" aria-hidden="true"></i></span>
+                    <p><strong>No benchmark yet</strong>Run it to compare detection, payoff and unpredictability across the three policies and both attacker models.</p>
+                </div>
+
+                <div id="evalResultsContainer" class="result" hidden>
+                    <div class="tabs" role="tablist" aria-label="Attacker model">
+                        <button id="tabRationalBtn" class="tab active" role="tab" aria-selected="true" type="button">Rational attacker</button>
+                        <button id="tabBoundedBtn" class="tab" role="tab" aria-selected="false" type="button">Bounded-rational attacker</button>
+                    </div>
+
+                    <dl class="leaders">
+                        <div>
+                            <dt>Highest detection</dt>
+                            <dd id="indBestDetection">-</dd>
+                            <span id="indBestDetectionVal">-</span>
+                        </div>
+                        <div>
+                            <dt>Best defender payoff</dt>
+                            <dd id="indBestUtility">-</dd>
+                            <span id="indBestUtilityVal">-</span>
+                        </div>
+                        <div>
+                            <dt>Most unpredictable</dt>
+                            <dd id="indMostUnpredictable">-</dd>
+                            <span id="indMostUnpredictableVal">-</span>
+                        </div>
+                    </dl>
+
+                    <div class="table-wrap">
+                        <table class="tbl">
+                            <thead>
+                                <tr>
+                                    <th>Policy</th>
+                                    <th class="num">Detection (95% CI)</th>
+                                    <th class="num">Breach rate</th>
+                                    <th class="num">Defender payoff</th>
+                                    <th class="num">Attacker payoff</th>
+                                    <th class="num">Entropy H/ln N</th>
+                                </tr>
+                            </thead>
+                            <tbody id="evalTableBody"></tbody>
+                        </table>
+                    </div>
+
+                    <p id="evalExplanation" class="panel-note eval-note"></p>
+
+                    <div class="charts-grid">
+                        <figure class="chart-card">
+                            <figcaption>Detection probability (%)</figcaption>
+                            <div class="chart-box"><canvas id="chartDetection"></canvas></div>
+                        </figure>
+                        <figure class="chart-card">
+                            <figcaption>Attack success rate (%)</figcaption>
+                            <div class="chart-box"><canvas id="chartSuccess"></canvas></div>
+                        </figure>
+                        <figure class="chart-card">
+                            <figcaption>Defender payoff</figcaption>
+                            <div class="chart-box"><canvas id="chartDefenderUtility"></canvas></div>
+                        </figure>
+                        <figure class="chart-card">
+                            <figcaption>Normalized entropy</figcaption>
+                            <div class="chart-box"><canvas id="chartUnpredictability"></canvas></div>
+                        </figure>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+
+        <!-- ========== 6. INSIGHTS ========== -->
+        <section id="insightsSection" class="section">
+            <div class="section-head">
+                <h2>Insights and recommendation</h2>
+                <p>What each policy trades away, and which one the benchmark supports.</p>
+            </div>
+
+            <div class="grid-2 grid-2-insight">
+                <div class="panel reveal" id="insightsContainer">
+                    <ul class="policy-list">
+                        <li>
+                            <h3 class="c-bad">Fixed schedule</h3>
+                            <p>Always runs the same route, so entropy is zero. An observer knows exactly which checkpoints go unwatched and attacks one of them with no risk.</p>
+                        </li>
+                        <li>
+                            <h3 class="c-warn">Uniform random</h3>
+                            <p>Gives every route equal probability, which maximizes entropy. It also guards a low-value corridor as often as the server room.</p>
+                        </li>
+                        <li>
+                            <h3 class="c-good">Stackelberg patrol</h3>
+                            <p>Solves for the commitment the attacker can best respond to least profitably. Coverage concentrates where an attack would otherwise pay most.</p>
+                        </li>
+                    </ul>
+
+                    <div class="bench-summary" id="dynamicInsightsBox">
+                        <h4>Benchmark summary</h4>
+                        <p id="insightTextDetection">Run the benchmark to see which policy detects the most attacks.</p>
+                        <p id="insightTextSuccess">Run the benchmark to see breach rates.</p>
+                        <p id="insightTextUnpred">Run the benchmark to see policy entropy.</p>
+                    </div>
+                </div>
+
+                <div class="panel reveal recommend" id="recommendationSection">
+                    <div class="panel-head">
+                        <h3>Recommended policy</h3>
+                        <span class="badge badge-good" id="recBadge" hidden>Supported by data</span>
+                    </div>
+
+                    <div id="recEmpty" class="empty">
+                        <span class="empty-icon"><i class="ph ph-seal-check" aria-hidden="true"></i></span>
+                        <p><strong>No recommendation yet</strong>The recommendation is derived from the benchmark, not assumed.</p>
+                    </div>
+                    <div id="recResult" class="result" hidden>
+                        <p id="recStrategyTitle" class="rec-title">-</p>
+                        <p id="recStrategyText" class="rec-text">-</p>
+                        <div id="recTradeoffsBox" class="tradeoffs"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+</div>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+<script src="script.js"></script>
 </body>
 </html>

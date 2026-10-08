@@ -59,12 +59,17 @@ The system runs `N` simulation rounds. In each round:
 ## 12. Installation Instructions
 1. Clone this repository.
 2. Install backend dependencies: `pip install -r backend/requirements.txt`
-3. The frontend is vanilla HTML/JS/CSS, no installation required.
+3. No frontend build step is needed (vanilla HTML/JS/CSS, Chart.js from a CDN).
 
 ## 13. How to Run
-1. Navigate to the `backend/` directory.
-2. Start the API server: `uvicorn main:app --reload`
-3. Open `frontend/index.html` in your web browser.
+From the repository root:
+```
+uvicorn backend.main:app --reload
+```
+Then open http://localhost:8000 (the API lives under `/api`, the dashboard is served at `/`).
+Run the test suite with `python -m pytest`.
+
+Optional: for frontend hot reload, run `npm install && npm run dev` inside `frontend/` (Vite on :3000 proxies `/api` to :8000).
 
 ## 14. Example Input
 - **Nodes**: Main Gate (value 9), Admin (value 6), Server Room (value 10)

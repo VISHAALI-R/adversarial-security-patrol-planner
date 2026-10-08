@@ -158,13 +158,14 @@ def evaluate_policy_single_or_multi(
     rounds: int = 1000,
     experiments: int = 10,
     lambda_val: float = 1.0,
-    random_seed: Optional[int] = 42
+    random_seed: Optional[int] = 42,
+    fixed_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Evaluates a specific patrol policy across multiple independent simulation experiments.
     Ensures statistical fairness by maintaining identical inputs across policies.
     """
-    policy = get_patrol_policy(policy_type, strategies, stackelberg_probs)
+    policy = get_patrol_policy(policy_type, strategies, stackelberg_probs, fixed_id)
     probs_list = list(policy.get("probabilities", {}).values())
     
     exp_metrics_list = []
@@ -181,7 +182,8 @@ def evaluate_policy_single_or_multi(
             patrol_policy=policy_type,
             attacker_type=attacker_type,
             lambda_val=lambda_val,
-            random_seed=seed
+            random_seed=seed,
+            fixed_id=fixed_id
         )
         
         m = evaluate_performance(sim_res, probs_list)
@@ -201,7 +203,8 @@ def evaluate_policies(
     experiments: int = 10,
     attacker_type: str = "rational",
     lambda_val: float = 1.0,
-    random_seed: Optional[int] = 42
+    random_seed: Optional[int] = 42,
+    fixed_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Evaluates Fixed, Uniform Random, and Game-Theoretic policies for a single attacker model.
@@ -220,7 +223,8 @@ def evaluate_policies(
             rounds=rounds,
             experiments=experiments,
             lambda_val=lambda_val,
-            random_seed=random_seed
+            random_seed=random_seed,
+            fixed_id=fixed_id
         )
         
     # Determine best strategies empirically from actual results
@@ -279,7 +283,8 @@ def evaluate_all_attacker_models(
     rounds: int = 1000,
     experiments: int = 10,
     lambda_val: float = 1.0,
-    random_seed: Optional[int] = 42
+    random_seed: Optional[int] = 42,
+    fixed_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Evaluates policy performance under both Rational and Bounded-Rational attacker models.
@@ -293,7 +298,8 @@ def evaluate_all_attacker_models(
         experiments=experiments,
         attacker_type="rational",
         lambda_val=lambda_val,
-        random_seed=random_seed
+        random_seed=random_seed,
+        fixed_id=fixed_id
     )
     
     bounded_res = evaluate_policies(
@@ -304,7 +310,8 @@ def evaluate_all_attacker_models(
         experiments=experiments,
         attacker_type="bounded",
         lambda_val=lambda_val,
-        random_seed=random_seed
+        random_seed=random_seed,
+        fixed_id=fixed_id
     )
     
     return {

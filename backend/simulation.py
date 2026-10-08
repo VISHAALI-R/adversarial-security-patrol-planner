@@ -13,7 +13,8 @@ def run_engine_simulation(
     patrol_policy: str = "game_theoretic",
     attacker_type: str = "rational",
     lambda_val: float = 1.0,
-    random_seed: int = None
+    random_seed: int = None,
+    fixed_id: str = None
 ) -> Dict[str, Any]:
     
     if num_rounds <= 0:
@@ -38,7 +39,7 @@ def run_engine_simulation(
             norm_strategies.append({"strategy_id": i + 1, "route_ids": []})
     strategies = norm_strategies
         
-    policy = get_patrol_policy(patrol_policy, strategies, stackelberg_probs)
+    policy = get_patrol_policy(patrol_policy, strategies, stackelberg_probs, fixed_id)
     probs_dict = policy.get("probabilities", {})
     
     if not probs_dict:
@@ -61,33 +62,52 @@ def run_engine_simulation(
                 target_coverage[n_key] += p
 
             
+    # Coverage is fixed for the whole run, so the attacker's response is computed once.
+    rational_target_name = None
+    bounded_names, bounded_probs = [], []
+    if attacker_type == "rational":
+        rational_target_name = evaluate_rational_attacker(graph, target_coverage).get("best_response")
+    elif attacker_type in ["bounded", "bounded_rational"]:
+        tp = evaluate_bounded_rational_attacker(graph, target_coverage, lambda_val)["target_probabilities"]
+        bounded_names = list(tp.keys())
+        bounded_probs = [tp[n] for n in bounded_names]
+    else:
+        raise ValueError(f"Invalid attacker type: {attacker_type}")
+
     detected_count = 0
     total_def_util = 0.0
     total_att_util = 0.0
     recent_log = []
     
-    for r in range(1, num_rounds + 1):
-        chosen_s_id = sample_patrol_strategy(policy)
-        idx = int(chosen_s_id[1:]) - 1
-        chosen_strategy = strategies[idx]
-        raw_patrol_route = chosen_strategy.get("route_ids", chosen_strategy.get("route", []))
+    # Policy sampling and route lookups are loop-invariant, so prepare them once. Sampling with
+    # a precomputed CDF and one uniform draw is exactly what np.random.choice does internally,
+    # so seeded runs reproduce the same sequence while avoiding per-round list rebuilding.
+    sample_keys = list(probs_dict.keys())
+    sample_probs = np.array([probs_dict[k] for k in sample_keys], dtype=float)
+    if abs(sample_probs.sum() - 1.0) > 1e-4:
+        raise ValueError(f"Probabilities must sum to 1.0, got {sample_probs.sum()}")
+    if (sample_probs < 0).any():
+        raise ValueError("Probabilities cannot be negative")
+    sample_cdf = sample_probs.cumsum()
+    sample_cdf /= sample_cdf[-1]
 
-        patrol_route_ids = [name_to_id.get(n, n) for n in raw_patrol_route]
-        
-        patrol_route_names = []
-        for n_id in patrol_route_ids:
-            node_data = graph.get_node_data(n_id)
-            patrol_route_names.append(node_data.get("name", n_id))
-            
+    route_cache = {}
+    for i, strat in enumerate(strategies):
+        raw = strat.get("route_ids", strat.get("route", []))
+        ids = [name_to_id.get(n, n) for n in raw]
+        route_cache[f"S{i+1}"] = (ids, [graph.get_node_data(n).get("name", n) for n in ids])
+
+    for r in range(1, num_rounds + 1):
+        chosen_s_id = sample_keys[int(sample_cdf.searchsorted(np.random.random_sample(), side="right"))]
+        patrol_route_ids, patrol_route_names = route_cache[chosen_s_id]
+
         if attacker_type == "rational":
-            att_res = evaluate_rational_attacker(graph, target_coverage)
-        elif attacker_type in ["bounded", "bounded_rational"]:
-            att_res = evaluate_bounded_rational_attacker(graph, target_coverage, lambda_val)
+            target_name = rational_target_name
         else:
-            raise ValueError(f"Invalid attacker type: {attacker_type}")
-            
-        target_name = att_res.get("best_response")
-        
+            # Bounded-rational (quantal response): sample a target from the softmax
+            # distribution each round instead of always taking the argmax.
+            target_name = str(np.random.choice(bounded_names, p=bounded_probs))
+
         target_id = None
         for n_id in graph.get_nodes():
             if graph.get_node_data(n_id).get("name", n_id) == target_name or n_id == target_name:

@@ -63,6 +63,7 @@ class GenerateStrategyRequestModel(BaseModel):
 class StrategyDetailModel(BaseModel):
     strategy_id: int
     route: List[str]
+    route_ids: List[str] = []
     total_travel_time: float
     covered_targets: List[str]
 
@@ -106,6 +107,7 @@ class EngineSimulationRequestModel(BaseModel):
     attacker_type: str = Field(default="rational")
     lambda_val: float = Field(default=1.0, alias="lambda")
     random_seed: Optional[int] = None
+    fixed_id: Optional[str] = None  # which route the fixed-schedule policy runs, e.g. "S12"
 
 class EngineSimulationResultModel(BaseModel):
     status: str = "success"
@@ -125,6 +127,7 @@ class EvaluationRunRequestModel(BaseModel):
     attacker_type: str = Field(default="rational")
     lambda_val: float = Field(default=1.0, alias="lambda")
     random_seed: Optional[int] = Field(default=42)
+    fixed_id: Optional[str] = None
 
 class EvaluationCompareRequestModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -132,4 +135,4 @@ class EvaluationCompareRequestModel(BaseModel):
     experiments: int = Field(default=10, gt=0)
     lambda_val: float = Field(default=1.0, alias="lambda")
     random_seed: Optional[int] = Field(default=42)
-
+    fixed_id: Optional[str] = None

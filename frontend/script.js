@@ -1,1272 +1,1128 @@
-const API_BASE_URL = "http://localhost:8000/api";
+/* Patrol Planner dashboard (vanilla JS, Chart.js for charts, canvas for the map). */
+"use strict";
 
+const API = "/api";
+const $ = (id) => document.getElementById(id);
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+/* ==========================================================================
+   State
+   ========================================================================== */
 let campusGraph = null;
 let currentStrategies = [];
-let highlightedRoute = [];
-let currentAttackerTarget = null;
-let currentAttackerProbs = {};
-
-let attackerChart = null;
-let baselineChart = null;
-let stackelbergChartInstance = null;
-
+let lastSolve = null;              // response of /stackelberg/solve
+let coverage = {};                 // node id -> coverage probability under the SSE policy
+let highlightedRoute = [];         // node ids of the route drawn on the map
+let selectedStrategyId = null;
+let currentAttackerTarget = null;  // node NAME the rational attacker picks
+let currentAttackerProbs = {};     // node NAME -> attack probability (bounded)
+let lastAttacker = null;
+let lastBaselines = null;
+let comparisonView = null;   // per-target coverage under each policy
 let evaluationData = null;
-let currentEvalTab = "rational"; // "rational" or "bounded"
+let currentEvalTab = "rational";
 
-let chartDetectionInstance = null;
-let chartSuccessInstance = null;
-let chartDefenderUtilityInstance = null;
-let chartUnpredictabilityInstance = null;
+const charts = {};
+const POLICY = {
+    fixed: { name: "Fixed schedule", long: "Fixed Schedule Patrol" },
+    uniform_random: { name: "Uniform random", long: "Uniform Random Patrol" },
+    game_theoretic: { name: "Game-theoretic", long: "Game-Theoretic Stackelberg Patrol" },
+};
+const POLICY_KEYS = ["fixed", "uniform_random", "game_theoretic"];
 
-const canvas = document.getElementById("campusMapCanvas");
-const ctx = canvas.getContext("2d");
-const mapTooltip = document.getElementById("mapNodeTooltip");
-const tooltipTitle = document.getElementById("tooltipTitle");
-const tooltipValue = document.getElementById("tooltipValue");
-const tooltipStatus = document.getElementById("tooltipStatus");
-const hudActiveRoute = document.getElementById("hudActiveRoute");
+/* ==========================================================================
+   Utilities
+   ========================================================================== */
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fix = (x, d = 2) => Number(x).toFixed(d);
+const pct = (x, d = 1) => `${(Number(x) * 100).toFixed(d)}%`;
+const signed = (x, d = 2) => (x > 0 ? "+" : "") + Number(x).toFixed(d);
+const arrow = (route) => route.map(esc).join(" &rarr; ");
 
-const btnGenerate = document.getElementById("btnGenerate");
-const btnRunStackelberg = document.getElementById("btnRunStackelberg");
-const btnAnalyzeAttacker = document.getElementById("btnAnalyzeAttacker");
-const btnRunSim = document.getElementById("btnRunSim");
-const btnRunEvaluation = document.getElementById("btnRunEvaluation");
-
-const btnRunFullEval = document.getElementById("btnRunFullEval");
-const btnRefreshResults = document.getElementById("btnRefreshResults");
-const btnResetDashboard = document.getElementById("btnResetDashboard");
-
-const tabRationalBtn = document.getElementById("tabRationalBtn");
-const tabBoundedBtn = document.getElementById("tabBoundedBtn");
-
-btnGenerate.addEventListener("click", handleGenerateStrategy);
-btnRunStackelberg.addEventListener("click", handleRunStackelberg);
-btnAnalyzeAttacker.addEventListener("click", handleAnalyzeAttacker);
-btnRunSim.addEventListener("click", handleRunSimulation);
-btnRunEvaluation.addEventListener("click", handleRunEvaluation);
-
-btnRunFullEval.addEventListener("click", handleRunFullEvaluation);
-btnRefreshResults.addEventListener("click", handleRefreshResults);
-btnResetDashboard.addEventListener("click", handleResetDashboard);
-
-tabRationalBtn.addEventListener("click", () => switchEvalTab("rational"));
-tabBoundedBtn.addEventListener("click", () => switchEvalTab("bounded"));
-
-// Retina / High-DPI Canvas Setup
-let dpr = window.devicePixelRatio || 1;
-function setupCanvasDpi() {
-    dpr = window.devicePixelRatio || 1;
-    const displayWidth = 620;
-    const displayHeight = 420;
-    canvas.width = displayWidth * dpr;
-    canvas.height = displayHeight * dpr;
-    canvas.style.width = `${displayWidth}px`;
-    canvas.style.height = `${displayHeight}px`;
-    ctx.scale(dpr, dpr);
+function fixedRouteId() {
+    const v = $("fixedStrategySelect").value;
+    return /^S\d+$/.test(v) ? v : undefined;
 }
-setupCanvasDpi();
-window.addEventListener("resize", () => {
-    setupCanvasDpi();
-    drawGraph();
-});
 
-// Auto-Fit Coordinate Normalizer
-function getScreenCoords(node) {
-    if (!campusGraph || !campusGraph.nodes || campusGraph.nodes.length === 0) {
-        return { x: node.x, y: node.y };
+function readNumber(id, fallback) {
+    const v = parseFloat($(id).value);
+    return Number.isFinite(v) ? v : fallback;
+}
+
+function setText(id, text) {
+    const el = $(id);
+    if (el.textContent === String(text)) return;
+    el.textContent = text;
+    if (!reducedMotion.matches) {
+        el.classList.remove("bump");
+        void el.offsetWidth; // restart the animation
+        el.classList.add("bump");
     }
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    campusGraph.nodes.forEach(n => {
-        if (n.x < minX) minX = n.x;
-        if (n.x > maxX) maxX = n.x;
-        if (n.y < minY) minY = n.y;
-        if (n.y > maxY) maxY = n.y;
+}
+
+function toast(message, type = "info", ms = 4600) {
+    const icons = { error: "ph-warning-circle", success: "ph-check-circle", info: "ph-info" };
+    const el = document.createElement("div");
+    el.className = `toast ${type}`;
+    el.innerHTML = `<i class="ph ${icons[type] || icons.info}" aria-hidden="true"></i><span>${esc(message)}</span>`;
+    $("toasts").appendChild(el);
+    const remove = () => { el.classList.add("out"); setTimeout(() => el.remove(), 260); };
+    setTimeout(remove, ms);
+    el.addEventListener("click", remove);
+}
+
+async function api(path, options) {
+    let res;
+    try {
+        res = await fetch(API + path, options);
+    } catch (e) {
+        setBackend(false);
+        throw new Error("Cannot reach the backend. Start it with: uvicorn backend.main:app");
+    }
+    if (!res.ok) {
+        let detail = "";
+        try { detail = (await res.json()).detail; } catch (e) { /* non-JSON error body */ }
+        throw new Error(typeof detail === "string" && detail ? detail : `Request failed (${res.status})`);
+    }
+    return res.json();
+}
+const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+/* Run an async action behind a button: spinner, no double submit, errors surface as a toast. */
+async function guarded(btn, loadingLabel, fn) {
+    if (btn.classList.contains("is-loading")) return;
+    const label = btn.querySelector(".btn-label");
+    const original = label.textContent;
+    btn.classList.add("is-loading");
+    btn.setAttribute("aria-busy", "true");
+    label.textContent = loadingLabel;
+    try {
+        await fn();
+    } catch (err) {
+        console.error(err);
+        toast(err.message || "Something went wrong.", "error");
+    } finally {
+        btn.classList.remove("is-loading");
+        btn.removeAttribute("aria-busy");
+        label.textContent = original;
+    }
+}
+
+function show(id, visible = true) { $(id).hidden = !visible; }
+function swap(emptyId, resultId, hasResult) { show(emptyId, !hasResult); show(resultId, hasResult); }
+
+function skeletonRows(tbody, cols, rows = 4) {
+    tbody.innerHTML = Array.from({ length: rows }, () =>
+        `<tr>${Array.from({ length: cols }, () => `<td><span class="skeleton"></span></td>`).join("")}</tr>`).join("");
+}
+
+/* ==========================================================================
+   Theme + palette (canvas and charts read their colours from the CSS tokens)
+   ========================================================================== */
+let P = {};
+function readPalette() {
+    const cs = getComputedStyle(document.documentElement);
+    const g = (n) => cs.getPropertyValue(n).trim();
+    P = {
+        stage: g("--surface-2"), surface: g("--surface"), s3: g("--surface-3"),
+        line: g("--line"), lineStrong: g("--line-strong"),
+        text: g("--text"), text2: g("--text-2"), muted: g("--muted"),
+        accent: g("--accent"), onAccent: g("--on-accent"), bad: g("--bad"), warn: g("--warn"), good: g("--good"),
+    };
+}
+
+function currentTheme() {
+    const explicit = document.documentElement.getAttribute("data-theme");
+    if (explicit) return explicit;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function syncThemeIcon() {
+    const dark = currentTheme() === "dark";
+    $("themeToggle").innerHTML = `<i class="ph ${dark ? "ph-sun" : "ph-moon"}" aria-hidden="true"></i>`;
+    $("themeToggle").setAttribute("aria-label", dark ? "Switch to light theme" : "Switch to dark theme");
+}
+
+function onThemeChanged() {
+    readPalette();
+    syncThemeIcon();
+    renderAllCharts();
+    requestDraw();
+}
+
+$("themeToggle").addEventListener("click", () => {
+    const next = currentTheme() === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("patrol-theme", next); } catch (e) { /* storage blocked */ }
+    onThemeChanged();
+});
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", onThemeChanged);
+
+/* ==========================================================================
+   Backend status + pipeline
+   ========================================================================== */
+function setBackend(up) {
+    const box = $("backendStatus");
+    box.dataset.state = up ? "up" : "down";
+    $("backendStatusText").textContent = up ? "Backend connected" : "Backend offline";
+}
+
+const STEPS = ["generate", "solve", "analyze", "simulate", "benchmark"];
+const stepsDone = new Set();
+function renderPipeline(active = null) {
+    document.querySelectorAll("#pipeline li").forEach((li) => {
+        const key = li.dataset.step;
+        li.classList.toggle("done", stepsDone.has(key));
+        li.classList.toggle("active", key === active && !stepsDone.has(key));
     });
+}
+function markStep(step) { stepsDone.add(step); renderPipeline(STEPS.find((s) => !stepsDone.has(s))); }
 
-    const displayW = canvas.width / dpr;
-    const displayH = canvas.height / dpr;
+/* ==========================================================================
+   Map canvas
+   ========================================================================== */
+const canvas = $("campusMapCanvas");
+const ctx = canvas.getContext("2d");
+const stage = $("mapStage");
+const mapTooltip = $("mapNodeTooltip");
+const FONT = "Geist, system-ui, sans-serif";
+const MONO = "'Geist Mono', ui-monospace, monospace";
 
-    const padX = 70;
-    const padTop = 50;
-    const padBottom = 60;
+let vw = 0, vh = 0, dpr = 1;
+let nodePos = {};      // node id -> {x, y} in CSS pixels
+let hoveredNode = null;
+let rafId = null;
 
-    const availW = displayW - padX * 2;
-    const availH = displayH - padTop - padBottom;
+function computeLayout() {
+    nodePos = {};
+    if (!campusGraph || !campusGraph.nodes.length) return;
+    const xs = campusGraph.nodes.map((n) => n.x);
+    const ys = campusGraph.nodes.map((n) => n.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+
+    const padX = Math.min(96, vw * 0.16);
+    const padTop = 56, padBottom = 60;
+    const availW = Math.max(1, vw - padX * 2);
+    const availH = Math.max(1, vh - padTop - padBottom);
     const rangeX = maxX - minX || 1;
     const rangeY = maxY - minY || 1;
 
-    const scale = Math.min(availW / rangeX, availH / rangeY);
-    const offsetX = (displayW - rangeX * scale) / 2;
-    const offsetY = padTop + (availH - rangeY * scale) / 2;
+    // The graph is a schematic, so each axis scales to fill the stage (capped so wide or tall
+    // stages do not stretch it absurdly). This keeps rows far enough apart for their labels.
+    const sx = Math.min(availW / rangeX, 2.4);
+    const sy = Math.min(availH / rangeY, 1.5);
+    const ox = (vw - rangeX * sx) / 2;
+    const oy = padTop + (availH - rangeY * sy) / 2;
 
+    campusGraph.nodes.forEach((n) => {
+        nodePos[n.id] = { x: ox + (n.x - minX) * sx, y: oy + (n.y - minY) * sy };
+    });
+}
+
+function resizeCanvas() {
+    const r = stage.getBoundingClientRect();
+    vw = Math.max(1, r.width);
+    vh = Math.max(1, r.height);
+    dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(vw * dpr);
+    canvas.height = Math.round(vh * dpr);
+    computeLayout();
+    requestDraw();
+}
+new ResizeObserver(resizeCanvas).observe(stage);
+
+/* The map only animates while something on it moves (a selected route or a threat ring). */
+function needsAnimation() {
+    return !reducedMotion.matches && (highlightedRoute.length > 1 || currentAttackerTarget !== null);
+}
+function requestDraw() {
+    if (rafId === null) rafId = requestAnimationFrame(frame);
+}
+function frame(t) {
+    rafId = null;
+    drawGraph(t);
+    if (needsAnimation()) requestDraw();
+}
+reducedMotion.addEventListener("change", requestDraw);
+
+function pill(x, y, w, h, fill, stroke) {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, Math.min(h / 2, 8));
+    ctx.fillStyle = fill;
+    ctx.fill();
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+}
+
+function routeSegments() {
+    const pts = highlightedRoute.map((id) => nodePos[id]).filter(Boolean);
+    const segs = [];
+    let total = 0;
+    for (let i = 0; i < pts.length - 1; i++) {
+        const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+        segs.push({ a: pts[i], b: pts[i + 1], len, start: total });
+        total += len;
+    }
+    return { segs, total };
+}
+
+function isRouteEdge(a, b) {
+    for (let i = 0; i < highlightedRoute.length - 1; i++) {
+        const u = highlightedRoute[i], v = highlightedRoute[i + 1];
+        if ((u === a && v === b) || (u === b && v === a)) return true;
+    }
+    return false;
+}
+
+function drawGraph(t = 0) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, vw, vh);
+    if (!campusGraph) {
+        ctx.fillStyle = P.muted;
+        ctx.font = `500 13px ${FONT}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("Loading campus graph", vw / 2, vh / 2);
+        return;
+    }
+    const animate = needsAnimation();
+
+    /* Edges */
+    campusGraph.edges.forEach((edge) => {
+        const a = nodePos[edge.source], b = nodePos[edge.destination];
+        if (!a || !b) return;
+        const onRoute = isRouteEdge(edge.source, edge.destination);
+
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.lineCap = "round";
+        ctx.strokeStyle = onRoute ? P.accent : P.lineStrong;
+        ctx.lineWidth = onRoute ? 3 : 1.5;
+        ctx.stroke();
+
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        const label = `${edge.travel_time}m`;
+        ctx.font = `500 11px ${MONO}`;
+        const w = ctx.measureText(label).width + 14;
+        pill(mx - w / 2, my - 10, w, 20, P.surface, onRoute ? P.accent : P.line);
+        ctx.fillStyle = onRoute ? P.accent : P.text2;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, mx, my + 0.5);
+    });
+
+    /* Patrol token travelling the selected route */
+    if (highlightedRoute.length > 1) {
+        const { segs, total } = routeSegments();
+        if (segs.length) {
+            let d = animate ? ((t / 1000) * 110) % (total + 50) : total;
+            d = Math.min(d, total);
+            const seg = segs.find((s) => d <= s.start + s.len) || segs[segs.length - 1];
+            const k = seg.len ? (d - seg.start) / seg.len : 0;
+            const px = seg.a.x + (seg.b.x - seg.a.x) * k;
+            const py = seg.a.y + (seg.b.y - seg.a.y) * k;
+            ctx.globalAlpha = 0.22;
+            ctx.beginPath(); ctx.arc(px, py, 12, 0, Math.PI * 2); ctx.fillStyle = P.accent; ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI * 2); ctx.fillStyle = P.accent; ctx.fill();
+            ctx.lineWidth = 2; ctx.strokeStyle = P.surface; ctx.stroke();
+        }
+    }
+
+    /* Nodes */
+    campusGraph.nodes.forEach((node) => {
+        const p = nodePos[node.id];
+        if (!p) return;
+        const onRoute = highlightedRoute.includes(node.id);
+        const isThreat = currentAttackerTarget === node.name;
+        const isHover = hoveredNode && hoveredNode.id === node.id;
+        const r = isHover ? 18 : 16;
+        const cov = coverage[node.id];
+
+        /* Coverage ring: share of patrols that pass through this checkpoint */
+        if (cov !== undefined) {
+            ctx.beginPath(); ctx.arc(p.x, p.y, 24, 0, Math.PI * 2);
+            ctx.strokeStyle = P.line; ctx.lineWidth = 3; ctx.stroke();
+            if (cov > 0.001) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 24, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, cov));
+                ctx.strokeStyle = P.accent; ctx.lineWidth = 3; ctx.lineCap = "round"; ctx.stroke();
+            }
+        }
+
+        /* Intruder target ring */
+        if (isThreat) {
+            ctx.save();
+            ctx.beginPath(); ctx.arc(p.x, p.y, 32, 0, Math.PI * 2);
+            ctx.setLineDash([6, 6]);
+            ctx.lineDashOffset = animate ? -t / 45 : 0;
+            ctx.strokeStyle = P.bad; ctx.lineWidth = 2; ctx.stroke();
+            ctx.restore();
+        }
+
+        /* Body */
+        ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = isThreat ? P.bad : onRoute ? P.accent : P.s3;
+        ctx.fill();
+        const prob = currentAttackerProbs[node.name];
+        if (!isThreat && !onRoute && prob > 0.05) {
+            ctx.globalAlpha = Math.min(0.9, Math.max(0.3, prob * 1.8));
+            ctx.fillStyle = P.bad; ctx.fill();
+            ctx.globalAlpha = 1;
+        }
+        ctx.lineWidth = isHover ? 3 : 2;
+        ctx.strokeStyle = isThreat ? P.bad : onRoute ? P.accent : P.lineStrong;
+        ctx.stroke();
+
+        ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = isThreat || onRoute ? P.onAccent : P.muted;
+        ctx.fill();
+
+        /* Name label */
+        ctx.font = `600 12px ${FONT}`;
+        const nameW = ctx.measureText(node.name).width + 18;
+        pill(p.x - nameW / 2, p.y - 52, nameW, 22, P.surface, P.line);
+        ctx.fillStyle = P.text;
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText(node.name, p.x, p.y - 40.5);
+
+        /* Value + coverage label */
+        const vText = `V${node.target_value}`;
+        const cText = cov !== undefined ? pct(cov, 0) : "";
+        ctx.font = `600 11px ${MONO}`;
+        const vW = ctx.measureText(vText).width;
+        const cW = cText ? ctx.measureText(cText).width : 0;
+        const gap = cText ? 8 : 0;
+        const totalW = vW + cW + gap + 16;
+        const top = p.y + 31;
+        pill(p.x - totalW / 2, top, totalW, 20, P.surface, P.line);
+        ctx.textAlign = "left";
+        ctx.fillStyle = node.target_value >= 8 ? P.warn : P.text2;
+        ctx.fillText(vText, p.x - totalW / 2 + 8, top + 10.5);
+        if (cText) {
+            ctx.fillStyle = P.accent;
+            ctx.fillText(cText, p.x - totalW / 2 + 8 + vW + gap, top + 10.5);
+        }
+    });
+}
+
+/* Hover / touch tooltip */
+function nodeAt(x, y) {
+    if (!campusGraph) return null;
+    let best = null, bestD = 30;
+    campusGraph.nodes.forEach((n) => {
+        const p = nodePos[n.id];
+        if (!p) return;
+        const d = Math.hypot(x - p.x, y - p.y);
+        if (d < bestD) { best = n; bestD = d; }
+    });
+    return best;
+}
+
+function updateTooltip(e) {
+    const rect = canvas.getBoundingClientRect();
+    const node = nodeAt(e.clientX - rect.left, e.clientY - rect.top);
+    const changed = (node && node.id) !== (hoveredNode && hoveredNode.id);
+    hoveredNode = node;
+    canvas.style.cursor = node ? "pointer" : "default";
+
+    if (!node) {
+        mapTooltip.classList.remove("visible");
+        if (changed) requestDraw();
+        return;
+    }
+    const p = nodePos[node.id];
+    $("tooltipTitle").textContent = node.name;
+    const cov = coverage[node.id];
+    $("tooltipValue").textContent = `Value ${node.target_value} of 10` + (cov !== undefined ? `, covered ${pct(cov)}` : "");
+
+    const status = $("tooltipStatus");
+    const prob = currentAttackerProbs[node.name];
+    if (currentAttackerTarget === node.name) {
+        status.textContent = "Intruder's best response"; status.style.color = P.bad;
+    } else if (prob !== undefined) {
+        status.textContent = `Attack probability ${pct(prob)}`; status.style.color = prob > 0.15 ? P.bad : P.warn;
+    } else if (highlightedRoute.includes(node.id)) {
+        status.textContent = "On the selected route"; status.style.color = P.accent;
+    } else {
+        status.textContent = "Not on the selected route"; status.style.color = P.muted;
+    }
+    mapTooltip.style.left = `${Math.min(Math.max(p.x, 90), vw - 90)}px`;
+    mapTooltip.style.top = `${p.y}px`;
+    mapTooltip.classList.add("visible");
+    if (changed) requestDraw();
+}
+canvas.addEventListener("pointermove", updateTooltip);
+canvas.addEventListener("pointerdown", updateTooltip);
+canvas.addEventListener("pointerleave", () => {
+    hoveredNode = null;
+    mapTooltip.classList.remove("visible");
+    requestDraw();
+});
+
+/* ==========================================================================
+   Charts
+   ========================================================================== */
+function chartDefaults() {
+    if (typeof Chart === "undefined") return false;
+    Chart.defaults.color = P.muted;
+    Chart.defaults.font.family = FONT;
+    Chart.defaults.font.size = 12;
+    Chart.defaults.animation = reducedMotion.matches ? false : { duration: 600, easing: "easeOutQuart" };
+    return true;
+}
+
+function chartOptions({ max, legend = false, percent = false } = {}) {
     return {
-        x: offsetX + (node.x - minX) * scale,
-        y: offsetY + (node.y - minY) * scale
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        scales: {
+            y: {
+                beginAtZero: true, max,
+                border: { display: false },
+                grid: { color: P.line },
+                ticks: { color: P.muted, callback: percent ? (v) => `${v}%` : undefined },
+            },
+            x: { grid: { display: false }, border: { color: P.lineStrong }, ticks: { color: P.muted, maxRotation: 0, autoSkip: false } },
+        },
+        plugins: {
+            legend: { display: legend, labels: { color: P.text2, boxWidth: 10, boxHeight: 10, usePointStyle: true, pointStyle: "rectRounded" } },
+            tooltip: {
+                backgroundColor: P.surface, borderColor: P.lineStrong, borderWidth: 1,
+                titleColor: P.text, bodyColor: P.text2, padding: 10, cornerRadius: 8, boxPadding: 4,
+            },
+        },
     };
 }
 
-// Animation loop for cyber patrol pulses
-let animProgress = 0;
-let hoveredNode = null;
-
-function animate() {
-    animProgress = (animProgress + 0.007) % 1.0;
-    drawGraph();
-    requestAnimationFrame(animate);
+function makeChart(key, canvasId, config) {
+    if (!chartDefaults()) return;
+    if (charts[key]) charts[key].destroy();
+    charts[key] = new Chart($(canvasId).getContext("2d"), config);
 }
-requestAnimationFrame(animate);
 
-function drawGraph() {
-    const displayW = canvas.width / dpr;
-    const displayH = canvas.height / dpr;
-    ctx.clearRect(0, 0, displayW, displayH);
-    if (!campusGraph) return;
-
-    // 1. Draw Edges
-    campusGraph.edges.forEach(edge => {
-        const source = campusGraph.nodes.find(n => n.id === edge.source);
-        const target = campusGraph.nodes.find(n => n.id === edge.destination);
-        if (source && target) {
-            const sCoords = getScreenCoords(source);
-            const tCoords = getScreenCoords(target);
-
-            let isHighlightedEdge = false;
-            let patrolDirForward = true;
-
-            if (highlightedRoute.length > 1) {
-                for (let i = 0; i < highlightedRoute.length - 1; i++) {
-                    if (highlightedRoute[i] === source.id && highlightedRoute[i+1] === target.id) {
-                        isHighlightedEdge = true;
-                        patrolDirForward = true;
-                        break;
-                    } else if (highlightedRoute[i] === target.id && highlightedRoute[i+1] === source.id) {
-                        isHighlightedEdge = true;
-                        patrolDirForward = false;
-                        break;
-                    }
-                }
-            }
-
-            ctx.beginPath();
-            ctx.moveTo(sCoords.x, sCoords.y);
-            ctx.lineTo(tCoords.x, tCoords.y);
-
-            if (isHighlightedEdge) {
-                // Outer glow
-                ctx.strokeStyle = "rgba(16, 185, 129, 0.4)";
-                ctx.lineWidth = 6;
-                ctx.stroke();
-
-                // Inner core
-                ctx.strokeStyle = "#10b981";
-                ctx.lineWidth = 3;
-                ctx.stroke();
-
-                // Animated light pulse
-                const pulseT = patrolDirForward ? animProgress : (1 - animProgress);
-                const px = sCoords.x + (tCoords.x - sCoords.x) * pulseT;
-                const py = sCoords.y + (tCoords.y - sCoords.y) * pulseT;
-
-                ctx.beginPath();
-                ctx.arc(px, py, 4, 0, Math.PI * 2);
-                ctx.fillStyle = "#ffffff";
-                ctx.shadowColor = "#34d399";
-                ctx.shadowBlur = 10;
-                ctx.fill();
-                ctx.shadowBlur = 0; // reset
-            } else {
-                ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
-                ctx.lineWidth = 1.5;
-                ctx.setLineDash([4, 4]);
-                ctx.stroke();
-                ctx.setLineDash([]); // reset
-            }
-
-            // Edge travel time badge
-            const mx = (sCoords.x + tCoords.x) / 2;
-            const my = (sCoords.y + tCoords.y) / 2;
-            
-            // Badge background pill
-            ctx.fillStyle = "rgba(11, 18, 34, 0.85)";
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.roundRect(mx - 15, my - 10, 30, 20, 6);
-            ctx.fill();
-            ctx.stroke();
-
-            ctx.fillStyle = isHighlightedEdge ? "#34d399" : "#94a3b8";
-            ctx.font = "600 10px 'JetBrains Mono', monospace";
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.fillText(`${edge.travel_time}m`, mx, my);
-        }
-    });
-
-    // 2. Draw Nodes
-    campusGraph.nodes.forEach(node => {
-        const coords = getScreenCoords(node);
-        const isHighlighted = highlightedRoute.includes(node.id);
-        const isAttackerTarget = (currentAttackerTarget === node.name);
-        const isHovered = (hoveredNode && hoveredNode.id === node.id);
-
-        const nodeRadius = isHovered ? 21 : 18;
-
-        // Threat or Patrol Glow Halos
-        if (isAttackerTarget) {
-            // Pulsing target reticle
-            const pulse = 1 + Math.sin(Date.now() / 150) * 0.2;
-            ctx.beginPath();
-            ctx.arc(coords.x, coords.y, 30 * pulse, 0, Math.PI * 2);
-            ctx.strokeStyle = "rgba(239, 68, 68, 0.5)";
-            ctx.lineWidth = 2;
-            ctx.setLineDash([6, 6]);
-            ctx.stroke();
-            ctx.setLineDash([]);
-        } else if (isHighlighted) {
-            ctx.beginPath();
-            ctx.arc(coords.x, coords.y, 25, 0, Math.PI * 2);
-            ctx.fillStyle = "rgba(16, 185, 129, 0.18)";
-            ctx.fill();
-        }
-
-        // Node base circle
-        ctx.beginPath();
-        ctx.arc(coords.x, coords.y, nodeRadius, 0, Math.PI * 2);
-
-        let fillColor = "#1e293b";
-        let strokeColor = "rgba(255, 255, 255, 0.3)";
-
-        if (isAttackerTarget) {
-            fillColor = "#ef4444";
-            strokeColor = "#fca5a5";
-        } else if (isHighlighted) {
-            fillColor = "#10b981";
-            strokeColor = "#a7f3d0";
-        } else if (currentAttackerProbs[node.name] > 0.05) {
-            const intensity = Math.min(1.0, currentAttackerProbs[node.name] * 1.8);
-            fillColor = `rgba(239, 68, 68, ${Math.max(0.35, intensity)})`;
-            strokeColor = "#f87171";
-        } else if (node.target_value >= 9) {
-            fillColor = "#1e1b4b";
-            strokeColor = "#818cf8";
-        }
-
-        ctx.fillStyle = fillColor;
-        ctx.fill();
-        ctx.strokeStyle = strokeColor;
-        ctx.lineWidth = isHovered ? 3 : 2;
-        ctx.stroke();
-
-        // Checkpoint Inner Core
-        ctx.beginPath();
-        ctx.arc(coords.x, coords.y, 6, 0, Math.PI * 2);
-        ctx.fillStyle = isHighlighted ? "#ffffff" : (isAttackerTarget ? "#ffffff" : "rgba(255, 255, 255, 0.6)");
-        ctx.fill();
-
-        // Node Name Label (Capsule background)
-        const nameText = node.name;
-        ctx.font = "700 11px 'Plus Jakarta Sans', sans-serif";
-        const nameWidth = ctx.measureText(nameText).width;
-        
-        ctx.fillStyle = "rgba(8, 15, 32, 0.85)";
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.roundRect(coords.x - nameWidth / 2 - 8, coords.y - 34, nameWidth + 16, 18, 4);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = "#f8fafc";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(nameText, coords.x, coords.y - 25);
-
-        // Value Badge Pill
-        const valText = `VAL ${node.target_value}`;
-        ctx.font = "700 9px 'JetBrains Mono', monospace";
-        const valWidth = ctx.measureText(valText).width;
-
-        const valBg = node.target_value >= 8 ? "rgba(245, 158, 11, 0.25)" : "rgba(255, 255, 255, 0.08)";
-        const valBorder = node.target_value >= 8 ? "rgba(245, 158, 11, 0.5)" : "rgba(255, 255, 255, 0.15)";
-        const valColor = node.target_value >= 8 ? "#fbbf24" : "#94a3b8";
-
-        ctx.fillStyle = valBg;
-        ctx.strokeStyle = valBorder;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.roundRect(coords.x - valWidth / 2 - 6, coords.y + 22, valWidth + 12, 16, 999);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = valColor;
-        ctx.fillText(valText, coords.x, coords.y + 30);
+function renderStackelbergChart() {
+    if (!lastSolve) return;
+    const rows = currentStrategies
+        .map((s, i) => ({ id: `S${i + 1}`, p: lastSolve.probabilities[i] || 0 }))
+        .filter((r) => r.p > 1e-6)
+        .sort((a, b) => b.p - a.p);
+    makeChart("stack", "stackelbergChart", {
+        type: "bar",
+        data: { labels: rows.map((r) => r.id), datasets: [{ label: "Probability (%)", data: rows.map((r) => +(r.p * 100).toFixed(2)), backgroundColor: P.accent, borderRadius: 4, maxBarThickness: 44 }] },
+        options: chartOptions({ percent: true }),
     });
 }
 
-// Canvas Mouse Move & Tooltip Hover Interaction
-canvas.addEventListener("mousemove", (e) => {
-    if (!campusGraph || !campusGraph.nodes) return;
-    const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    let matchedNode = null;
-    campusGraph.nodes.forEach(node => {
-        const coords = getScreenCoords(node);
-        const dist = Math.hypot(mouseX - coords.x, mouseY - coords.y);
-        if (dist <= 26) {
-            matchedNode = node;
-        }
+function renderAttackerChart() {
+    if (!lastAttacker) return;
+    const { labels, data, type } = lastAttacker;
+    const top = Math.max(...data);
+    const colors = type === "rational"
+        ? data.map((v) => (v === top ? P.bad : P.lineStrong))
+        : data.map((v) => { const a = Math.round(Math.min(1, Math.max(0.25, v * 1.5)) * 255).toString(16).padStart(2, "0"); return P.bad.length === 7 ? P.bad + a : P.bad; });
+    makeChart("attacker", "attackerChart", {
+        type: "bar",
+        data: { labels: labels.map((l) => l.split(" ")), datasets: [{ label: type === "rational" ? "Expected utility" : "Attack probability", data, backgroundColor: colors, borderRadius: 4, maxBarThickness: 44 }] },
+        options: chartOptions(),
     });
-
-    hoveredNode = matchedNode;
-
-    if (matchedNode) {
-        canvas.style.cursor = "pointer";
-        const coords = getScreenCoords(matchedNode);
-        
-        tooltipTitle.textContent = `${matchedNode.name} (ID: ${matchedNode.id})`;
-        tooltipValue.textContent = `Asset Valuation: ${matchedNode.target_value} / 10`;
-
-        const isPatrolled = highlightedRoute.includes(matchedNode.id);
-        const isThreat = (currentAttackerTarget === matchedNode.name);
-        const threatProb = currentAttackerProbs[matchedNode.name];
-
-        if (isThreat) {
-            tooltipStatus.textContent = "PRIMARY ATTACKER TARGET (MAX UTILITY)";
-            tooltipStatus.style.color = "#f87171";
-        } else if (threatProb !== undefined) {
-            tooltipStatus.textContent = `Intruder Prob: ${(threatProb * 100).toFixed(1)}%`;
-            tooltipStatus.style.color = threatProb > 0.15 ? "#f87171" : "#fbbf24";
-        } else if (isPatrolled) {
-            tooltipStatus.textContent = "Protected on Current Patrol Route";
-            tooltipStatus.style.color = "#34d399";
-        } else {
-            tooltipStatus.textContent = "Unpatrolled on Active Route";
-            tooltipStatus.style.color = "#94a3b8";
-        }
-
-        mapTooltip.style.left = `${coords.x}px`;
-        mapTooltip.style.top = `${coords.y}px`;
-        mapTooltip.classList.add("visible");
-    } else {
-        canvas.style.cursor = "crosshair";
-        mapTooltip.classList.remove("visible");
-    }
-});
-
-canvas.addEventListener("mouseleave", () => {
-    hoveredNode = null;
-    mapTooltip.classList.remove("visible");
-});
-
-// Initialize Dashboard Data
-async function initDashboard() {
-    try {
-        const res = await fetch(`${API_BASE_URL}/campus`);
-        campusGraph = await res.json();
-        
-        document.getElementById("statLocations").textContent = campusGraph.nodes.length;
-        document.getElementById("statRoutes").textContent = campusGraph.edges.length;
-        
-        let highest = campusGraph.nodes.reduce((max, node) => node.target_value > max.target_value ? node : max, campusGraph.nodes[0]);
-        document.getElementById("statHighestValue").textContent = `${highest.name} (${highest.target_value})`;
-        
-        drawGraph();
-    } catch (err) {
-        console.error("Failed to fetch campus graph", err);
-    }
 }
 
-initDashboard();
-
-// Step 2: Feasible Strategies Generation
-async function handleGenerateStrategy() {
-    btnGenerate.disabled = true;
-    btnGenerate.innerHTML = `<span class="pulse-dot"></span> Computing...`;
-    document.getElementById("placeholderGen").style.display = "block";
-    document.getElementById("placeholderGen").textContent = "Computing feasible DFS patrol schedules...";
-    document.getElementById("strategyTableContainer").style.display = "none";
-    highlightedRoute = [];
-    hudActiveRoute.textContent = "ROUTE: UNASSIGNED";
-    drawGraph();
-    
-    try {
-        const patrolUnits = parseInt(document.getElementById("patrolUnits").value) || 1;
-        const shiftDuration = parseFloat(document.getElementById("shiftDuration").value) || 30;
-        const maxCheckpoints = parseInt(document.getElementById("maxCheckpoints").value) || 5;
-        
-        document.getElementById("statUnits").textContent = patrolUnits;
-        document.getElementById("statShift").textContent = `${shiftDuration} min`;
-
-        const reqPayload = {
-            patrol_units: patrolUnits,
-            shift_duration: shiftDuration,
-            max_checkpoints: maxCheckpoints
-        };
-
-        const res = await fetch(`${API_BASE_URL}/strategies/generate`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(reqPayload)
-        });
-        
-        const data = await res.json();
-        currentStrategies = data.strategies;
-
-        if (!currentStrategies || currentStrategies.length === 0) {
-            document.getElementById("placeholderGen").textContent = "No feasible strategies found within time/checkpoint constraints.";
-            return;
-        }
-
-        document.getElementById("placeholderGen").style.display = "none";
-        document.getElementById("strategyTableContainer").style.display = "block";
-        
-        const tbody = document.getElementById("strategyTableBody");
-        tbody.innerHTML = "";
-        
-        currentStrategies.forEach(strat => {
-            const tr = document.createElement("tr");
-            tr.style.cursor = "pointer";
-            
-            tr.innerHTML = `
-                <td style="font-weight: 700; color: #34d399; font-family: 'JetBrains Mono', monospace;">S${strat.strategy_id}</td>
-                <td>${strat.route.join(" &rarr; ")}</td>
-                <td style="font-family: 'JetBrains Mono', monospace;">${strat.total_travel_time}m</td>
-                <td style="color: var(--text-secondary);">${strat.covered_targets.join(", ")}</td>
-            `;
-            
-            tr.addEventListener("click", () => selectStrategy(strat, tr));
-            tbody.appendChild(tr);
-        });
-
-        // Setup Fixed Strategy Dropdown
-        const fixedSelect = document.getElementById("fixedStrategySelect");
-        fixedSelect.innerHTML = "";
-        currentStrategies.forEach((strat, i) => {
-            const opt = document.createElement("option");
-            opt.value = `S${i+1}`;
-            opt.textContent = `Strategy S${i+1}: ${strat.route.join(" → ")}`;
-            fixedSelect.appendChild(opt);
-        });
-
-        // Automatically trigger Stackelberg Optimization background state setup
-        await solveStackelbergInternal(false);
-        await fetchBaselines();
-
-    } catch (err) {
-        console.error(err);
-        alert("Unable to generate strategies. Please verify backend status.");
-        document.getElementById("placeholderGen").textContent = "Error generating strategies.";
-    } finally {
-        btnGenerate.disabled = false;
-        btnGenerate.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg> Generate Feasible Strategies`;
-    }
+function renderBaselineChart() {
+    if (!comparisonView) return;
+    const { nodes, cov } = comparisonView;
+    const series = (policy, color) => ({
+        label: POLICY[policy].name, backgroundColor: color, borderRadius: 3, maxBarThickness: 22,
+        data: nodes.map((n) => +(cov[policy][n.id] * 100).toFixed(1)),
+    });
+    makeChart("baseline", "baselineChart", {
+        type: "bar",
+        data: { labels: nodes.map((n) => n.name.split(" ")), datasets: [series("fixed", P.bad), series("uniform_random", P.warn), series("game_theoretic", P.accent)] },
+        options: chartOptions({ legend: true, max: 100, percent: true }),
+    });
 }
 
-function selectStrategy(strat, trElement) {
-    const rows = document.querySelectorAll("#strategyTableBody tr");
-    rows.forEach(r => r.classList.remove("active-row"));
-    trElement.classList.add("active-row");
-    
+function renderEvalCharts() {
+    const tab = evalTab();
+    if (!tab) return;
+    const colors = [P.bad, P.warn, P.accent];
+    const labels = POLICY_KEYS.map((k) => POLICY[k].name);
+    const col = (fn) => POLICY_KEYS.map((k) => fn(tab.data[k]));
+    const bar = (key, id, label, data, opts) => makeChart(key, id, {
+        type: "bar",
+        data: { labels, datasets: [{ label, data, backgroundColor: colors, borderRadius: 4, maxBarThickness: 64 }] },
+        options: chartOptions(opts),
+    });
+    bar("det", "chartDetection", "Detection (%)", col((m) => +(m.detection_probability * 100).toFixed(2)), { max: 100, percent: true });
+    bar("succ", "chartSuccess", "Attack success (%)", col((m) => +(m.attack_success_rate * 100).toFixed(2)), { max: 100, percent: true });
+    bar("util", "chartDefenderUtility", "Defender payoff", col((m) => +m.defender_utility.toFixed(3)));
+    bar("ent", "chartUnpredictability", "Normalized entropy", col((m) => +m.unpredictability.toFixed(3)), { max: 1 });
+}
+
+function renderAllCharts() {
+    renderStackelbergChart();
+    renderAttackerChart();
+    renderBaselineChart();
+    renderEvalCharts();
+}
+
+/* ==========================================================================
+   Route selection
+   ========================================================================== */
+function strategyRow(strat, cells) {
+    const tr = document.createElement("tr");
+    tr.dataset.selectable = "";
+    tr.dataset.id = strat.strategy_id;
+    tr.tabIndex = 0;
+    tr.innerHTML = cells;
+    const pick = () => selectStrategy(strat);
+    tr.addEventListener("click", pick);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+    return tr;
+}
+
+function selectStrategy(strat) {
+    selectedStrategyId = strat.strategy_id;
+    document.querySelectorAll("tr[data-selectable]").forEach((r) => r.classList.toggle("active-row", Number(r.dataset.id) === strat.strategy_id));
     highlightedRoute = strat.route_ids || strat.route;
-    hudActiveRoute.textContent = `ROUTE: S${strat.strategy_id} (${strat.route.join("→")})`;
-    drawGraph();
+    const chip = $("hudActiveRoute");
+    chip.textContent = `S${strat.strategy_id}: ${strat.route.join(" → ")}`;
+    chip.classList.add("on");
+    requestDraw();
 }
 
-// Step 3: Stackelberg Optimization
-async function solveStackelbergInternal(showUI = true) {
-    if (!currentStrategies || currentStrategies.length === 0) {
-        if (showUI) alert("Please generate feasible patrol strategies first.");
-        return null;
+function clearSelection() {
+    selectedStrategyId = null;
+    highlightedRoute = [];
+    $("hudActiveRoute").textContent = "No route selected";
+    $("hudActiveRoute").classList.remove("on");
+    document.querySelectorAll("tr.active-row").forEach((r) => r.classList.remove("active-row"));
+}
+
+/* ==========================================================================
+   Step 1-2: routes and equilibrium
+   ========================================================================== */
+async function generateStrategies() {
+    const shift = readNumber("shiftDuration", 30);
+    const maxCp = Math.floor(readNumber("maxCheckpoints", 5));
+    if (shift <= 0) throw new Error("Shift duration must be greater than zero.");
+    if (maxCp < 1) throw new Error("A route needs at least one checkpoint.");
+
+    clearDownstream();
+    clearSelection();
+    renderPipeline("generate");
+    show("strategyEmpty", false);
+    show("strategyResult", true);
+    skeletonRows($("strategyTableBody"), 4, 5);
+
+    $("statShift").textContent = `${shift} min`;
+    let data;
+    try {
+        data = await post("/strategies/generate", { patrol_units: 1, shift_duration: shift, max_checkpoints: maxCp });
+    } catch (err) {
+        swap("strategyEmpty", "strategyResult", false);
+        throw err;
+    }
+    currentStrategies = data.strategies || [];
+
+    if (!currentStrategies.length) {
+        swap("strategyEmpty", "strategyResult", false);
+        $("strategyEmpty").querySelector("p").innerHTML = "<strong>No feasible routes</strong>No route fits inside this shift length. Increase the shift duration.";
+        throw new Error("No feasible routes within these limits.");
     }
 
-    const patrolUnits = parseInt(document.getElementById("patrolUnits").value) || 1;
-    const shiftDuration = parseFloat(document.getElementById("shiftDuration").value) || 30;
+    $("strategyCount").textContent = currentStrategies.length;
+    const tbody = $("strategyTableBody");
+    tbody.innerHTML = "";
+    currentStrategies.forEach((s) => {
+        tbody.appendChild(strategyRow(s, `
+            <td class="id-cell">S${s.strategy_id}</td>
+            <td>${arrow(s.route)}</td>
+            <td class="num">${s.total_travel_time}m</td>
+            <td class="num">${s.covered_targets.length}</td>`));
+    });
 
-    const simReq = {
-        game_config: {
-            patrol_units: patrolUnits,
-            shift_duration: shiftDuration,
-            graph: campusGraph
-        },
+    const sel = $("fixedStrategySelect");
+    sel.disabled = false;
+    sel.innerHTML = currentStrategies.map((s, i) => `<option value="S${i + 1}">S${i + 1}: ${esc(s.route.join(" → "))}</option>`).join("");
+
+    markStep("generate");
+    await solveEquilibrium();
+}
+
+async function solveEquilibrium() {
+    if (!currentStrategies.length) throw new Error("Generate routes first.");
+    renderPipeline("solve");
+    show("stackEmpty", false);
+    show("stackelbergResultsContainer", true);
+    skeletonRows($("stackelbergTableBody"), 3, 4);
+
+    const data = await post("/stackelberg/solve", {
+        game_config: { patrol_units: 1, shift_duration: readNumber("shiftDuration", 30), graph: campusGraph },
         num_simulations: 1,
         attacker_config: { type: "rational", lambda_val: 1.0 },
         strategy_probabilities: {},
-        strategies: currentStrategies.map(s => s.route_ids || s.route)
-    };
-
-    const res = await fetch(`${API_BASE_URL}/stackelberg/solve`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(simReq)
+        strategies: currentStrategies.map((s) => s.route_ids || s.route),
     });
-
-    if (!res.ok) {
-        throw new Error("Unable to calculate the optimal patrol policy.");
-    }
-
-    const data = await res.json();
-
-    if (showUI) {
-        renderStackelbergResults(data);
-    }
-    return data;
+    lastSolve = data;
+    coverage = data.target_coverage || {};
+    renderStackelberg();
+    markStep("solve");
+    $("btnSamplePatrol").disabled = false;
+    await fetchBaselines();
+    requestDraw();
 }
 
-async function handleRunStackelberg() {
-    btnRunStackelberg.disabled = true;
-    btnRunStackelberg.innerHTML = `<span class="pulse-dot"></span> Solving LP...`;
-    
-    try {
-        await solveStackelbergInternal(true);
-        await fetchBaselines();
-    } catch (err) {
-        console.error(err);
-        alert("Unable to calculate the optimal patrol policy. Please check input parameters.");
-    } finally {
-        btnRunStackelberg.disabled = false;
-        btnRunStackelberg.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> Solve Stackelberg LP`;
-    }
-}
+function renderStackelberg() {
+    const d = lastSolve;
+    setText("stackDefenderUtility", fix(d.defender_utility));
+    setText("stackAttackerUtility", fix(d.attacker_utility));
+    const best = campusGraph.nodes.find((n) => n.id === d.attacker_best_response);
+    setText("stackBestResponse", best ? best.name : d.attacker_best_response || "-");
 
-function renderStackelbergResults(data) {
-    document.getElementById("stackelbergResultsContainer").style.display = "block";
-    
-    document.getElementById("stackDefenderUtility").textContent = data.defender_utility.toFixed(2);
-    document.getElementById("stackAttackerUtility").textContent = data.attacker_utility.toFixed(2);
-    document.getElementById("stackBestResponse").textContent = data.attacker_best_response || "--";
-
-    // Pair strategy info with calculated probabilities and sort highest to lowest
-    const stratsWithProb = currentStrategies.map((s, i) => {
-        const prob = data.probabilities[i] || 0.0;
-        return { strategy: s, prob: prob, id: `S${i+1}` };
-    });
-
-    stratsWithProb.sort((a, b) => b.prob - a.prob);
-
-    const tbody = document.getElementById("stackelbergTableBody");
+    const rows = currentStrategies.map((s, i) => ({ s, p: d.probabilities[i] || 0 })).sort((a, b) => b.p - a.p);
+    const tbody = $("stackelbergTableBody");
     tbody.innerHTML = "";
-
-    const labels = [];
-    const probData = [];
-
-    stratsWithProb.forEach(item => {
-        labels.push(item.id);
-        probData.push((item.prob * 100).toFixed(1));
-
-        const tr = document.createElement("tr");
-        tr.style.cursor = "pointer";
-        tr.innerHTML = `
-            <td style="font-weight: 700; color: #34d399; font-family: 'JetBrains Mono', monospace;">${item.id}</td>
-            <td>${item.strategy.route.join(" &rarr; ")}</td>
-            <td style="text-align: right; font-weight: 700; color: #34d399; font-family: 'JetBrains Mono', monospace;">${(item.prob * 100).toFixed(1)}%</td>
-        `;
-        tr.addEventListener("click", () => selectStrategy(item.strategy, tr));
+    rows.forEach(({ s, p }) => {
+        const tr = strategyRow(s, `
+            <td class="id-cell">S${s.strategy_id}</td>
+            <td>${arrow(s.route)}</td>
+            <td class="num ${p > 1e-6 ? "c-good" : ""}" style="${p > 1e-6 ? "" : "color:var(--muted)"}">${pct(p)}</td>`);
         tbody.appendChild(tr);
     });
-
-    // Draw Stackelberg Bar Chart
-    const ctxStack = document.getElementById('stackelbergChart').getContext('2d');
-    if (stackelbergChartInstance) stackelbergChartInstance.destroy();
-
-    const gradient = ctxStack.createLinearGradient(0, 0, 0, 200);
-    gradient.addColorStop(0, '#10b981');
-    gradient.addColorStop(1, '#047857');
-
-    stackelbergChartInstance = new Chart(ctxStack, {
-        type: 'bar',
-        data: {
-            labels: labels,
-            datasets: [{
-                label: 'Stackelberg Probability (%)',
-                data: probData,
-                backgroundColor: gradient,
-                borderRadius: 6,
-                borderSkipped: false
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: {
-                y: { 
-                    beginAtZero: true, 
-                    max: 100, 
-                    ticks: { color: '#94a3b8', font: { family: 'Plus Jakarta Sans', size: 11 } }, 
-                    grid: { color: 'rgba(255,255,255,0.06)' } 
-                },
-                x: { 
-                    ticks: { color: '#94a3b8', font: { family: 'JetBrains Mono', size: 11 } }, 
-                    grid: { display: false } 
-                }
-            },
-            plugins: { 
-                legend: { display: false },
-                tooltip: {
-                    backgroundColor: 'rgba(11, 18, 34, 0.95)',
-                    titleColor: '#38bdf8',
-                    bodyColor: '#f8fafc',
-                    borderColor: 'rgba(56, 189, 248, 0.3)',
-                    borderWidth: 1,
-                    padding: 10,
-                    cornerRadius: 8
-                }
-            }
-        }
-    });
+    if (selectedStrategyId) document.querySelectorAll(`tr[data-id="${selectedStrategyId}"]`).forEach((r) => r.classList.add("active-row"));
+    renderStackelbergChart();
 }
 
-// Step 4: Attacker Model UI Logic
-const attackerRadios = document.getElementsByName("attackerType");
-const lambdaGroup = document.getElementById("lambdaInputGroup");
-const lambdaValInput = document.getElementById("lambdaVal");
-const lambdaDisplay = document.getElementById("lambdaDisplay");
-const attackerExplanation = document.getElementById("attackerExplanation");
-const radioLabelRational = document.getElementById("radioLabelRational");
-const radioLabelBounded = document.getElementById("radioLabelBounded");
-
-if (lambdaValInput) {
-    lambdaValInput.addEventListener("input", (e) => {
-        if (lambdaDisplay) lambdaDisplay.textContent = parseFloat(e.target.value).toFixed(1);
-    });
+async function samplePatrol() {
+    if (!lastSolve) throw new Error("Solve the equilibrium first.");
+    const res = await post("/policy/sample", { policy_type: "game_theoretic" });
+    const idx = parseInt(String(res.selected_strategy).slice(1), 10) - 1;
+    const strat = currentStrategies[idx];
+    if (!strat) throw new Error("The sampled route is out of date. Generate routes again.");
+    selectStrategy(strat);
+    toast(`Sampled ${res.selected_strategy}, chosen with probability ${pct(lastSolve.probabilities[idx] || 0)}.`, "info");
 }
 
-attackerRadios.forEach(radio => {
+/* ==========================================================================
+   Step 3: attacker
+   ========================================================================== */
+const radioRational = $("radioLabelRational");
+const radioBounded = $("radioLabelBounded");
+document.getElementsByName("attackerType").forEach((radio) => {
     radio.addEventListener("change", (e) => {
-        if (e.target.value === "bounded") {
-            radioLabelBounded.classList.add("active");
-            radioLabelRational.classList.remove("active");
-            lambdaGroup.style.display = "block";
-            attackerExplanation.textContent = '"The intruder chooses targets probabilistically according to their expected utility via Softmax (Bounded Rationality)."';
-        } else {
-            radioLabelRational.classList.add("active");
-            radioLabelBounded.classList.remove("active");
-            lambdaGroup.style.display = "none";
-            attackerExplanation.textContent = '"The intruder always chooses the target location with the highest expected utility."';
-        }
+        const bounded = e.target.value === "bounded";
+        radioBounded.classList.toggle("active", bounded);
+        radioRational.classList.toggle("active", !bounded);
+        show("lambdaInputGroup", bounded);
+        $("attackerExplanation").textContent = bounded
+            ? "The intruder picks targets at random, weighted by expected utility through a softmax. Higher λ means closer to rational."
+            : "The intruder evaluates the patrol's coverage and attacks the checkpoint with the highest expected utility.";
     });
 });
+$("lambdaVal").addEventListener("input", (e) => {
+    const v = parseFloat(e.target.value);
+    $("lambdaDisplay").textContent = Number.isFinite(v) ? v.toFixed(1) : "-";
+});
 
-async function handleAnalyzeAttacker() {
-    if (!currentStrategies || currentStrategies.length === 0) {
-        alert("Please generate feasible patrol strategies first.");
-        return;
-    }
-
-    btnAnalyzeAttacker.disabled = true;
-    btnAnalyzeAttacker.innerHTML = `<span class="pulse-dot"></span> Analyzing...`;
-    
-    try {
-        const type = document.querySelector('input[name="attackerType"]:checked').value;
-        const lambdaVal = parseFloat(document.getElementById("lambdaVal").value) || 1.0;
-        
-        const reqPayload = { attacker_type: type, lambda: lambdaVal };
-
-        const res = await fetch(`${API_BASE_URL}/attacker/evaluate`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(reqPayload)
-        });
-        
-        if (!res.ok) {
-            alert("Error running attacker model. Did you generate strategies first?");
-            return;
-        }
-        
-        const data = await res.json();
-        renderAttackerResults(data);
-        
-    } catch (err) {
-        console.error(err);
-        alert("Error connecting to backend attacker analysis endpoint.");
-    } finally {
-        btnAnalyzeAttacker.disabled = false;
-        btnAnalyzeAttacker.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Analyze Threat Response`;
-    }
+async function analyzeAttacker() {
+    if (!currentStrategies.length) throw new Error("Generate routes first.");
+    renderPipeline("analyze");
+    const type = document.querySelector('input[name="attackerType"]:checked').value;
+    const lambda = readNumber("lambdaVal", 1.0);
+    if (type === "bounded" && lambda <= 0) throw new Error("Lambda must be greater than zero.");
+    const data = await post("/attacker/evaluate", { attacker_type: type, lambda });
+    renderAttacker(data);
+    markStep("analyze");
 }
 
-function renderAttackerResults(data) {
-    document.getElementById("attackerResultsSection").style.display = "block";
-    const tbody = document.getElementById("attackerTableBody");
+function renderAttacker(data) {
+    swap("attackerEmpty", "attackerResultsSection", true);
+    const tbody = $("attackerTableBody");
     tbody.innerHTML = "";
-    
     currentAttackerTarget = null;
     currentAttackerProbs = {};
-    
-    let labels = [];
-    let chartData = [];
-    
+    const labels = [], values = [];
+
     if (data.attacker_type === "rational") {
-        document.getElementById("rationalResults").style.display = "block";
-        document.getElementById("bestResponseTarget").textContent = data.best_response;
-        document.getElementById("bestResponseUtility").textContent = data.best_response_utility.toFixed(2);
-        document.getElementById("attackerTableMetricHeader").textContent = "Expected Utility";
-        
+        show("rationalResults", true);
+        setText("bestResponseTarget", data.best_response);
+        setText("bestResponseUtility", fix(data.best_response_utility));
+        $("attackerTableMetricHeader").textContent = "Expected utility";
         currentAttackerTarget = data.best_response;
-        
-        for (const [target, utility] of Object.entries(data.target_utilities)) {
-            labels.push(target);
-            chartData.push(utility);
-            
-            const tr = document.createElement("tr");
-            tr.innerHTML = `
-                <td style="font-weight: 600;">${target}</td>
-                <td style="text-align: right; font-family: 'JetBrains Mono', monospace; color: #f87171; font-weight: 700;">${utility.toFixed(2)}</td>
-            `;
-            tbody.appendChild(tr);
-        }
-        
-        drawAttackerChart(labels, chartData, "Expected Utility", "rational");
-        
+        Object.entries(data.target_utilities).forEach(([name, u]) => {
+            labels.push(name); values.push(u);
+            tbody.insertAdjacentHTML("beforeend", `<tr><td>${esc(name)}</td><td class="num ${name === data.best_response ? "c-bad" : ""}">${signed(u)}</td></tr>`);
+        });
+        lastAttacker = { labels, data: values, type: "rational" };
     } else {
-        document.getElementById("rationalResults").style.display = "none";
-        document.getElementById("attackerTableMetricHeader").textContent = "Attack Probability";
-        
+        show("rationalResults", false);
+        $("attackerTableMetricHeader").textContent = "Attack probability";
         currentAttackerProbs = data.target_probabilities;
-        
-        for (const [target, prob] of Object.entries(data.target_probabilities)) {
-            labels.push(target);
-            chartData.push(prob);
-            
-            const tr = document.createElement("tr");
-            tr.innerHTML = `
-                <td style="font-weight: 600;">${target}</td>
-                <td style="text-align: right; font-family: 'JetBrains Mono', monospace; color: #fbbf24; font-weight: 700;">${(prob * 100).toFixed(1)}%</td>
-            `;
-            tbody.appendChild(tr);
-        }
-        
-        drawAttackerChart(labels, chartData, "Attack Probability", "bounded");
+        Object.entries(data.target_probabilities).forEach(([name, p]) => {
+            labels.push(name); values.push(p);
+            tbody.insertAdjacentHTML("beforeend", `<tr><td>${esc(name)}</td><td class="num">${pct(p)}</td></tr>`);
+        });
+        lastAttacker = { labels, data: values, type: "bounded" };
     }
-    
-    drawGraph();
+    renderAttackerChart();
+    requestDraw();
 }
 
-function drawAttackerChart(labels, data, labelName, type) {
-    const ctxAtt = document.getElementById('attackerChart').getContext('2d');
-    if (attackerChart) attackerChart.destroy();
-    
-    let bgColors = (type === "rational")
-        ? data.map(v => v === Math.max(...data) ? '#ef4444' : 'rgba(148, 163, 184, 0.4)')
-        : data.map(v => `rgba(248, 113, 113, ${Math.max(0.25, v * 1.5)})`);
-
-    attackerChart = new Chart(ctxAtt, {
-        type: 'bar',
-        data: {
-            labels: labels,
-            datasets: [{ label: labelName, data: data, backgroundColor: bgColors, borderRadius: 6 }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: {
-                y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#94a3b8' } },
-                x: { grid: { display: false }, ticks: { color: '#94a3b8' } }
-            },
-            plugins: { 
-                legend: { display: false },
-                tooltip: {
-                    backgroundColor: 'rgba(11, 18, 34, 0.95)',
-                    titleColor: '#38bdf8',
-                    bodyColor: '#f8fafc',
-                    borderColor: 'rgba(56, 189, 248, 0.3)',
-                    borderWidth: 1,
-                    padding: 10,
-                    cornerRadius: 8
-                }
-            }
-        }
-    });
-}
-
-// Step 5: Baseline Strategy Comparison Logic
-const fixedSelect = document.getElementById("fixedStrategySelect");
-fixedSelect.addEventListener("change", fetchBaselines);
+/* ==========================================================================
+   Baselines
+   ========================================================================== */
+$("fixedStrategySelect").addEventListener("change", () => fetchBaselines().catch((e) => toast(e.message, "error")));
 
 async function fetchBaselines() {
-    if (currentStrategies.length === 0) return;
-    document.getElementById("comparisonSection").style.display = "block";
-    
-    try {
-        const fixedId = fixedSelect.value;
-        const url = fixedId ? `${API_BASE_URL}/baselines?fixed_id=${fixedId}` : `${API_BASE_URL}/baselines`;
-        
-        const res = await fetch(url);
-        if (!res.ok) throw new Error("Failed to fetch baselines");
-        
-        const data = await res.json();
-        renderBaselineResults(data);
-    } catch (err) {
-        console.error("Error fetching baselines:", err);
-    }
+    if (!currentStrategies.length) return;
+    const fixedId = $("fixedStrategySelect").value;
+    lastBaselines = await api(fixedId ? `/baselines?fixed_id=${encodeURIComponent(fixedId)}` : "/baselines");
+    renderBaselines();
 }
 
-function renderBaselineResults(data) {
-    const fixed = data.fixed;
-    const uniform = data.uniform_random;
-    const game = data.game_theoretic;
-    
-    if (!fixed || !fixed.probabilities) return;
-    const strategyKeys = Object.keys(fixed.probabilities);
-    
-    const headerRow = document.getElementById("baselineTableHeaderRow");
-    headerRow.innerHTML = '<th>Patrol Policy</th>';
-    strategyKeys.forEach(s => {
-        headerRow.innerHTML += `<th style="text-align: right;">${s}</th>`;
+/* What the attacker actually observes: the share of patrols that pass through each target. */
+function policyCoverage(probs) {
+    const cov = {};
+    campusGraph.nodes.forEach((n) => { cov[n.id] = 0; });
+    currentStrategies.forEach((s, i) => {
+        const p = probs[`S${i + 1}`] || 0;
+        (s.route_ids || []).forEach((id) => { if (id in cov) cov[id] += p; });
     });
-    
-    const tbody = document.getElementById("baselineTableBody");
-    tbody.innerHTML = "";
-    
-    const renderRow = (name, probsData, color) => {
-        const tr = document.createElement("tr");
-        let html = `<td style="font-weight: 700; color: ${color};">${name}</td>`;
-        strategyKeys.forEach(s => {
-            const val = probsData[s] || 0.0;
-            html += `<td style="text-align: right; font-family: 'JetBrains Mono', monospace;">${(val * 100).toFixed(1)}%</td>`;
-        });
-        tr.innerHTML = html;
-        return tr;
+    return cov;
+}
+
+function renderBaselines() {
+    const data = lastBaselines;
+    if (!data || !data.fixed || !data.fixed.probabilities) return;
+    swap("comparisonEmpty", "comparisonResult", true);
+
+    const cov = {
+        fixed: policyCoverage(data.fixed.probabilities),
+        uniform_random: policyCoverage(data.uniform_random.probabilities),
+        game_theoretic: policyCoverage(data.game_theoretic.probabilities),
     };
-    
-    tbody.appendChild(renderRow("Fixed Schedule", fixed.probabilities, "#f87171"));
-    tbody.appendChild(renderRow("Uniform Random", uniform.probabilities, "#fbbf24"));
-    tbody.appendChild(renderRow("Game-Theoretic", game.probabilities, "#34d399"));
-    
-    drawBaselineChart(strategyKeys, fixed.probabilities, uniform.probabilities, game.probabilities);
+    const nodes = campusGraph.nodes.slice().sort((a, b) => b.target_value - a.target_value);
+    comparisonView = { nodes, cov };
+
+    const tbody = $("baselineTableBody");
+    tbody.innerHTML = "";
+    nodes.forEach((n) => {
+        const cell = (k) => `<td class="num">${pct(cov[k][n.id], 0)}</td>`;
+        tbody.insertAdjacentHTML("beforeend",
+            `<tr><td>${esc(n.name)}</td><td class="num">${n.target_value}</td>${cell("fixed")}${cell("uniform_random")}${cell("game_theoretic")}</tr>`);
+    });
+    renderBaselineChart();
 }
 
-function drawBaselineChart(labels, fixedProbs, uniformProbs, gameProbs) {
-    const ctxBase = document.getElementById('baselineChart').getContext('2d');
-    if (baselineChart) baselineChart.destroy();
-    
-    const fixedData = labels.map(l => (fixedProbs[l] || 0) * 100);
-    const uniformData = labels.map(l => (uniformProbs[l] || 0) * 100);
-    const gameData = labels.map(l => (gameProbs[l] || 0) * 100);
+/* ==========================================================================
+   Step 4: simulation
+   ========================================================================== */
+async function runSimulation() {
+    if (!currentStrategies.length) throw new Error("Generate routes first.");
+    renderPipeline("simulate");
+    const rounds = Math.floor(readNumber("simRounds", 1000));
+    if (rounds < 1) throw new Error("Rounds must be at least 1.");
+    const data = await post("/simulation/run", {
+        rounds,
+        patrol_policy: $("simPolicy").value,
+        attacker_type: $("simAttackerType").value,
+        lambda: readNumber("lambdaVal", 1.0),
+        random_seed: Math.floor(readNumber("simSeed", 42)),
+        fixed_id: fixedRouteId(),
+    });
+    renderSimulation(data);
+    markStep("simulate");
+}
 
-    baselineChart = new Chart(ctxBase, {
-        type: 'bar',
-        data: {
-            labels: labels,
-            datasets: [
-                { label: 'Fixed Schedule', data: fixedData, backgroundColor: '#ef4444', borderRadius: 6 },
-                { label: 'Uniform Random', data: uniformData, backgroundColor: '#f59e0b', borderRadius: 6 },
-                { label: 'Game-Theoretic', data: gameData, backgroundColor: '#10b981', borderRadius: 6 }
-            ]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: {
-                y: { beginAtZero: true, max: 100, ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' } },
-                x: { ticks: { color: '#94a3b8' }, grid: { display: false } }
-            },
-            plugins: { 
-                legend: { labels: { color: '#e2e8f0', font: { family: 'Plus Jakarta Sans' } } },
-                tooltip: {
-                    backgroundColor: 'rgba(11, 18, 34, 0.95)',
-                    borderColor: 'rgba(56, 189, 248, 0.3)',
-                    borderWidth: 1,
-                    cornerRadius: 8
-                }
-            }
+function renderSimulation(d) {
+    swap("simEmpty", "simResult", true);
+    setText("simTotalRounds", d.rounds.toLocaleString());
+    setText("simDetected", d.detected_attacks.toLocaleString());
+    setText("simSuccessful", d.successful_attacks.toLocaleString());
+    setText("simDetectionProb", pct(d.detection_probability));
+    setText("simDefUtil", signed(d.average_defender_utility));
+    setText("simAttUtil", signed(d.average_attacker_utility));
+
+    const split = $("simSplit").children;
+    split[0].style.flex = `${d.detection_probability} 1 0`;
+    split[1].style.flex = `${1 - d.detection_probability} 1 0`;
+
+    const tbody = $("simLogTableBody");
+    tbody.innerHTML = "";
+    (d.recent_log || []).forEach((e) => {
+        const idx = parseInt(String(e.patrol_strategy).slice(1), 10) - 1;
+        const strat = currentStrategies[idx];
+        const badge = e.detected ? `<span class="badge badge-good">Intercepted</span>` : `<span class="badge badge-bad">Breached</span>`;
+        const cells = `
+            <td class="mono">#${e.round}</td>
+            <td class="id-cell">${esc(e.patrol_strategy)}</td>
+            <td>${esc(e.attacker_target)}</td>
+            <td>${badge}</td>
+            <td class="num">${signed(e.defender_utility, 0)}</td>`;
+        if (strat) {
+            tbody.appendChild(strategyRow(strat, cells));
+        } else {
+            tbody.insertAdjacentHTML("beforeend", `<tr>${cells}</tr>`);
         }
     });
 }
 
-// Step 6: Attack Simulation Engine Logic
-async function handleRunSimulation() {
-    if (!currentStrategies || currentStrategies.length === 0) {
-        alert("Please generate feasible patrol strategies first.");
-        return;
-    }
-
-    btnRunSim.disabled = true;
-    btnRunSim.innerHTML = `<span class="pulse-dot"></span> Simulating...`;
-
-    try {
-        const rounds = parseInt(document.getElementById("simRounds").value) || 1000;
-        const policy = document.getElementById("simPolicy").value;
-        const attackerType = document.getElementById("simAttackerType").value;
-        const seed = parseInt(document.getElementById("simSeed").value) || 42;
-        const lambdaVal = parseFloat(document.getElementById("lambdaVal").value) || 1.0;
-
-        const reqPayload = {
-            rounds: rounds,
-            patrol_policy: policy,
-            attacker_type: attackerType,
-            lambda: lambdaVal,
-            random_seed: seed
-        };
-
-        const res = await fetch(`${API_BASE_URL}/simulation/run`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(reqPayload)
-        });
-
-        if (!res.ok) {
-            alert("Simulation failed. Please check backend parameters.");
-            return;
-        }
-
-        const data = await res.json();
-        renderSimulationResults(data);
-
-    } catch (err) {
-        console.error("Simulation error:", err);
-        alert("Failed to connect to simulation API.");
-    } finally {
-        btnRunSim.disabled = false;
-        btnRunSim.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Run Attack Simulation`;
-    }
+/* ==========================================================================
+   Step 5: benchmark + insights
+   ========================================================================== */
+function evalTab() {
+    if (!evaluationData) return null;
+    const rational = currentEvalTab === "rational";
+    return {
+        data: rational ? evaluationData.rational_attacker : evaluationData.bounded_rational_attacker,
+        summary: rational ? evaluationData.rational_summary : evaluationData.bounded_summary,
+    };
 }
 
-function renderSimulationResults(data) {
-    document.getElementById("simResultsSection").style.display = "block";
-    
-    document.getElementById("simTotalRounds").textContent = data.rounds.toLocaleString();
-    document.getElementById("simDetected").textContent = data.detected_attacks.toLocaleString();
-    document.getElementById("simSuccessful").textContent = data.successful_attacks.toLocaleString();
-    document.getElementById("simDetectionProb").textContent = `${(data.detection_probability * 100).toFixed(1)}%`;
-
-    const tbody = document.getElementById("simLogTableBody");
-    tbody.innerHTML = "";
-
-    if (data.recent_log && data.recent_log.length > 0) {
-        data.recent_log.forEach(entry => {
-            const tr = document.createElement("tr");
-            
-            const badge = entry.detected 
-                ? '<span class="badge-tag badge-detected">INTERCEPTED</span>'
-                : '<span class="badge-tag badge-breach">BREACH</span>';
-
-            tr.innerHTML = `
-                <td style="font-family: 'JetBrains Mono', monospace;">#${entry.round}</td>
-                <td style="font-weight: 600;">${entry.patrol_strategy}</td>
-                <td style="font-weight: 600;">${entry.attacker_target}</td>
-                <td>${badge}</td>
-                <td style="text-align: right; font-family: 'JetBrains Mono', monospace; color: #38bdf8;">${entry.defender_utility}</td>
-            `;
-            tbody.appendChild(tr);
-        });
-    }
-}
-
-// Step 7: Performance Evaluation & Statistical Benchmark Logic
 function switchEvalTab(tab) {
     currentEvalTab = tab;
-    if (tab === "rational") {
-        tabRationalBtn.classList.add("active");
-        tabBoundedBtn.classList.remove("active");
-    } else {
-        tabBoundedBtn.classList.add("active");
-        tabRationalBtn.classList.remove("active");
-    }
-    if (evaluationData) {
-        renderEvaluationDashboard();
-    }
+    const rational = tab === "rational";
+    $("tabRationalBtn").classList.toggle("active", rational);
+    $("tabBoundedBtn").classList.toggle("active", !rational);
+    $("tabRationalBtn").setAttribute("aria-selected", rational);
+    $("tabBoundedBtn").setAttribute("aria-selected", !rational);
+    if (evaluationData) renderEvaluation();
 }
 
-async function handleRunEvaluation() {
-    btnRunEvaluation.disabled = true;
-    btnRunEvaluation.innerHTML = `<span class="pulse-dot"></span> Benchmarking...`;
-    
-    try {
-        const rounds = parseInt(document.getElementById("evalRounds").value) || 1000;
-        const experiments = parseInt(document.getElementById("evalExperiments").value) || 10;
-        const lambdaVal = parseFloat(document.getElementById("evalLambda").value) || 1.0;
-        const seed = parseInt(document.getElementById("evalSeed").value) || 42;
-        
-        const reqPayload = {
-            rounds: rounds,
-            experiments: experiments,
-            lambda: lambdaVal,
-            random_seed: seed
-        };
-        
-        const res = await fetch(`${API_BASE_URL}/evaluation/compare`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(reqPayload)
-        });
-        
-        if (!res.ok) {
-            alert("Error running evaluation API.");
-            return;
-        }
-        
-        evaluationData = await res.json();
-        document.getElementById("evalResultsContainer").style.display = "block";
-        renderEvaluationDashboard();
-        
-    } catch (err) {
-        console.error("Evaluation error:", err);
-        alert("Failed to connect to evaluation endpoint.");
-    } finally {
-        btnRunEvaluation.disabled = false;
-        btnRunEvaluation.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg> Execute Empirical Benchmark`;
-    }
+async function runBenchmark() {
+    if (!currentStrategies.length) throw new Error("Generate routes first.");
+    renderPipeline("benchmark");
+    const rounds = Math.floor(readNumber("evalRounds", 1000));
+    const experiments = Math.floor(readNumber("evalExperiments", 10));
+    const lambda = readNumber("evalLambda", 1.0);
+    if (rounds < 1 || experiments < 1) throw new Error("Rounds and trials must be at least 1.");
+    if (lambda <= 0) throw new Error("Lambda must be greater than zero.");
+    evaluationData = await post("/evaluation/compare", { rounds, experiments, lambda, random_seed: Math.floor(readNumber("evalSeed", 42)), fixed_id: fixedRouteId() });
+    swap("evalEmpty", "evalResultsContainer", true);
+    renderEvaluation();
+    markStep("benchmark");
 }
 
-function renderEvaluationDashboard() {
-    if (!evaluationData) return;
-    
-    const isRational = (currentEvalTab === "rational");
-    const tabData = isRational ? evaluationData.rational_attacker : evaluationData.bounded_rational_attacker;
-    const tabSummary = isRational ? evaluationData.rational_summary : evaluationData.bounded_summary;
-    
-    if (!tabData) return;
-    
-    // Indicators
-    const bestStrats = tabSummary.best_strategy;
-    document.getElementById("indBestDetection").textContent = bestStrats.best_detection;
-    document.getElementById("indBestDetectionVal").textContent = `${(bestStrats.best_detection_val * 100).toFixed(1)}% Interception Ratio`;
-    
-    document.getElementById("indBestUtility").textContent = bestStrats.best_defender_utility;
-    document.getElementById("indBestUtilityVal").textContent = `Payoff: ${bestStrats.best_defender_utility_val.toFixed(2)}`;
-    
-    document.getElementById("indMostUnpredictable").textContent = bestStrats.most_unpredictable;
-    document.getElementById("indMostUnpredictableVal").textContent = `Normalized Entropy: ${bestStrats.most_unpredictable_val.toFixed(2)}`;
-    
-    // Table with 95% Wilson Confidence Intervals
-    const tbody = document.getElementById("evalTableBody");
+function renderEvaluation() {
+    const tab = evalTab();
+    if (!tab) return;
+    const { data, summary } = tab;
+    const best = summary.best_strategy;
+
+    setText("indBestDetection", best.best_detection);
+    setText("indBestDetectionVal", `${pct(best.best_detection_val)} of attacks intercepted`);
+    setText("indBestUtility", best.best_defender_utility);
+    setText("indBestUtilityVal", `payoff ${signed(best.best_defender_utility_val)}`);
+    setText("indMostUnpredictable", best.most_unpredictable);
+    setText("indMostUnpredictableVal", `entropy ${fix(best.most_unpredictable_val)}`);
+
+    const tbody = $("evalTableBody");
     tbody.innerHTML = "";
-    
-    const policyNames = {
-        "fixed": "Fixed Schedule Patrol",
-        "uniform_random": "Uniform Random Patrol",
-        "game_theoretic": "Game-Theoretic Patrol"
-    };
-    
-    const policyColors = {
-        "fixed": "#f87171",
-        "uniform_random": "#fbbf24",
-        "game_theoretic": "#34d399"
-    };
-    
-    ["fixed", "uniform_random", "game_theoretic"].forEach(pKey => {
-        const m = tabData[pKey];
+    const tone = { fixed: "bad", uniform_random: "warn", game_theoretic: "good" };
+    POLICY_KEYS.forEach((k) => {
+        const m = data[k];
         if (!m) return;
-        
-        const tr = document.createElement("tr");
-        
-        const detPct = (m.detection_probability * 100).toFixed(1);
-        const ciLowPct = (m.confidence_interval_lower * 100).toFixed(1);
-        const ciUpPct = (m.confidence_interval_upper * 100).toFixed(1);
-        const succPct = (m.attack_success_rate * 100).toFixed(1);
-        const defUtil = m.defender_utility.toFixed(2);
-        const attUtil = m.attacker_utility.toFixed(2);
-        const unpred = m.unpredictability.toFixed(2);
-        
-        tr.innerHTML = `
-            <td style="font-weight: 700; color: ${policyColors[pKey]};">${policyNames[pKey]}</td>
-            <td style="text-align: right; font-family: 'JetBrains Mono', monospace;">${detPct}% <span style="font-size: 0.75rem; color: #94a3b8;">[${ciLowPct}%, ${ciUpPct}%]</span></td>
-            <td style="text-align: right; font-family: 'JetBrains Mono', monospace;">${succPct}%</td>
-            <td style="text-align: right; font-family: 'JetBrains Mono', monospace;">${defUtil}</td>
-            <td style="text-align: right; font-family: 'JetBrains Mono', monospace;">${attUtil}</td>
-            <td style="text-align: right; font-family: 'JetBrains Mono', monospace;">${unpred}</td>
-        `;
-        tbody.appendChild(tr);
+        tbody.insertAdjacentHTML("beforeend", `
+            <tr>
+                <td class="c-${tone[k]}" style="font-weight:600">${POLICY[k].name}</td>
+                <td class="num">${pct(m.detection_probability)} <span class="ci">[${fix(m.confidence_interval_lower * 100)}, ${fix(m.confidence_interval_upper * 100)}]</span></td>
+                <td class="num">${pct(m.attack_success_rate)}</td>
+                <td class="num">${signed(m.defender_utility)}</td>
+                <td class="num">${signed(m.attacker_utility)}</td>
+                <td class="num">${fix(m.unpredictability)}</td>
+            </tr>`);
     });
-    
-    // Render 4 Polished Visualizers
-    renderEvaluationCharts(tabData);
 
-    // Dynamic Security Insights & Recommendations update strictly derived from empirical data
-    updateSecurityInsightsAndRecommendation(tabSummary, tabData);
+    $("evalExplanation").textContent = summary.explanation;
+    renderEvalCharts();
+    renderInsights(data, summary);
 }
 
-function updateSecurityInsightsAndRecommendation(summary, tabData) {
-    const bestDetName = summary.best_strategy.best_detection;
-    const bestDetVal = (summary.best_strategy.best_detection_val * 100).toFixed(1);
-    
-    const lowestSuccVal = (Math.min(tabData.fixed.attack_success_rate, tabData.uniform_random.attack_success_rate, tabData.game_theoretic.attack_success_rate) * 100).toFixed(1);
-    const mostUnpredName = summary.best_strategy.most_unpredictable;
-    const mostUnpredVal = summary.best_strategy.most_unpredictable_val.toFixed(2);
+/* The recommendation follows the game's own objective, expected defender payoff,
+   and every number quoted below comes from the benchmark that was just run. */
+function renderInsights(data, summary) {
+    const rational = currentEvalTab === "rational";
+    const ranked = POLICY_KEYS.slice().sort((a, b) => data[b].defender_utility - data[a].defender_utility);
+    const winner = ranked[0], runnerUp = ranked[1];
+    const lowestBreach = Math.min(...POLICY_KEYS.map((k) => data[k].attack_success_rate));
+    const best = summary.best_strategy;
 
-    document.getElementById("insightTextDetection").innerHTML = `The highest detection probability was achieved by <strong style="color: #34d399;">${bestDetName}</strong> (${bestDetVal}%).`;
-    document.getElementById("insightTextSuccess").innerHTML = `The lowest attack breach rate was achieved by <strong style="color: #34d399;">${bestDetName}</strong> (${lowestSuccVal}%).`;
-    document.getElementById("insightTextUnpred").innerHTML = `The highest patrol schedule unpredictability was achieved by <strong style="color: #fbbf24;">${mostUnpredName}</strong> (${mostUnpredVal} normalized entropy).`;
+    $("insightTextDetection").innerHTML = `Highest detection: <strong>${esc(best.best_detection)}</strong> at ${pct(best.best_detection_val)}.`;
+    $("insightTextSuccess").innerHTML = `Lowest breach rate: <strong>${pct(lowestBreach)}</strong>, which is ${pct(1 - lowestBreach)} detection.`;
+    $("insightTextUnpred").innerHTML = `Most unpredictable: <strong>${esc(best.most_unpredictable)}</strong> (normalized entropy ${fix(best.most_unpredictable_val)}).`;
 
-    // Dynamic recommendation text strictly matching actual calculations
-    const recTitle = document.getElementById("recStrategyTitle");
-    const recText = document.getElementById("recStrategyText");
-    const recTradeoffs = document.getElementById("recTradeoffsBox");
+    swap("recEmpty", "recResult", true);
+    show("recBadge", true);
+    $("recStrategyTitle").textContent = POLICY[winner].long;
+    $("recStrategyText").textContent =
+        `Highest expected defender payoff against the ${rational ? "rational" : "bounded-rational"} attacker: ${signed(data[winner].defender_utility)}, ` +
+        `with ${pct(data[winner].detection_probability)} of attacks intercepted. ` +
+        `Next best is ${POLICY[runnerUp].name.toLowerCase()} at ${signed(data[runnerUp].defender_utility)}.`;
 
-    recTitle.textContent = bestDetName;
-    recText.textContent = `${bestDetName} demonstrated superior performance across repeated randomized trials with an interception probability of ${bestDetVal}% and expected defender payoff of ${summary.best_strategy.best_defender_utility_val.toFixed(2)}.`;
-
-    if (bestDetName.includes("Game-Theoretic")) {
-        recTradeoffs.innerHTML = `
-            <strong style="color: #38bdf8;">Empirical Rationale & Operational Trade-offs:</strong>
-            <ul style="margin-top: 0.5rem; padding-left: 1.2rem; line-height: 1.6;">
-                <li><strong>Optimal Target Valuation Weighting:</strong> Allocates surveillance probabilities proportional to checkpoint asset values, ensuring high-value locations remain strongly protected.</li>
-                <li><strong>Strategic Randomization:</strong> Retains high unpredictability against observing adversaries, eliminating exploitable patrol patterns.</li>
-            </ul>
-        `;
+    const items = [];
+    if (winner === "game_theoretic") {
+        const used = lastSolve ? lastSolve.probabilities.filter((p) => p > 1e-6).length : null;
+        items.push(`<li><b>Targeted coverage.</b> Probability concentrates on ${used !== null ? `${used} of ${currentStrategies.length} routes` : "a few routes"} that guard the targets an attacker would otherwise prefer.</li>`);
+        items.push(`<li><b>Less random than uniform.</b> Normalized entropy is ${fix(data.game_theoretic.unpredictability)} against ${fix(data.uniform_random.unpredictability)}, so the schedule is harder to guess only where it matters.</li>`);
+        const r = evaluationData.rational_attacker.game_theoretic.defender_utility;
+        const b = evaluationData.bounded_rational_attacker.game_theoretic.defender_utility;
+        items.push(`<li><b>Attacker model matters.</b> Payoff is ${signed(r)} against a rational attacker and ${signed(b)} against a bounded-rational one with λ=${fix(readNumber("evalLambda", 1), 1)}.</li>`);
+    } else if (winner === "uniform_random") {
+        items.push(`<li><b>Maximum entropy.</b> Every route is equally likely, so the schedule cannot be predicted.</li>`);
+        items.push(`<li><b>No prioritization.</b> Low-value corridors get the same attention as the most valuable targets.</li>`);
     } else {
-        recTradeoffs.innerHTML = `
-            <strong style="color: #38bdf8;">Empirical Rationale & Operational Trade-offs:</strong>
-            <ul style="margin-top: 0.5rem; padding-left: 1.2rem; line-height: 1.6;">
-                <li><strong>Maximal Spatial Entropy:</strong> Equalizes path coverage to keep adversaries guessing across all perimeter corridors.</li>
-                <li><strong>Uniform Resource Distribution:</strong> Note that uniform coverage treats low-value checkpoints with equal weight to critical infrastructure.</li>
-            </ul>
-        `;
+        items.push(`<li><b>Predictable.</b> The fixed route won in this setup, but an attacker who observes it can always avoid it.</li>`);
     }
+    $("recTradeoffsBox").innerHTML = `<h4>Trade-offs</h4><ul>${items.join("")}</ul>`;
 }
 
-function renderEvaluationCharts(tabData) {
-    const labels = ["Fixed Schedule", "Uniform Random", "Game-Theoretic"];
-    const colors = ["#ef4444", "#f59e0b", "#10b981"];
-    
-    const detData = [tabData.fixed.detection_probability * 100, tabData.uniform_random.detection_probability * 100, tabData.game_theoretic.detection_probability * 100];
-    const succData = [tabData.fixed.attack_success_rate * 100, tabData.uniform_random.attack_success_rate * 100, tabData.game_theoretic.attack_success_rate * 100];
-    const defUtilData = [tabData.fixed.defender_utility, tabData.uniform_random.defender_utility, tabData.game_theoretic.defender_utility];
-    const unpredData = [tabData.fixed.unpredictability, tabData.uniform_random.unpredictability, tabData.game_theoretic.unpredictability];
-    
-    const commonScales = {
-        y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#94a3b8' } },
-        x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { family: 'Plus Jakarta Sans', size: 11 } } }
-    };
-    
-    const commonPlugins = {
-        legend: { display: false },
-        tooltip: {
-            backgroundColor: 'rgba(11, 18, 34, 0.95)',
-            borderColor: 'rgba(56, 189, 248, 0.3)',
-            borderWidth: 1,
-            cornerRadius: 8
-        }
-    };
+/* ==========================================================================
+   Reset / refresh / full pipeline
+   ========================================================================== */
+function clearDownstream() {
+    currentAttackerTarget = null;
+    currentAttackerProbs = {};
+    lastAttacker = null;
+    lastBaselines = null;
+    comparisonView = null;
+    lastSolve = null;
+    coverage = {};
+    evaluationData = null;
+    ["stack", "attacker", "baseline", "det", "succ", "util", "ent"].forEach((k) => { if (charts[k]) { charts[k].destroy(); delete charts[k]; } });
 
-    const ctxDet = document.getElementById("chartDetection").getContext("2d");
-    if (chartDetectionInstance) chartDetectionInstance.destroy();
-    chartDetectionInstance = new Chart(ctxDet, {
-        type: 'bar',
-        data: { labels: labels, datasets: [{ label: 'Detection Prob (%)', data: detData, backgroundColor: colors, borderRadius: 6 }] },
-        options: { responsive: true, maintainAspectRatio: false, scales: commonScales, plugins: commonPlugins }
-    });
-    
-    const ctxSucc = document.getElementById("chartSuccess").getContext("2d");
-    if (chartSuccessInstance) chartSuccessInstance.destroy();
-    chartSuccessInstance = new Chart(ctxSucc, {
-        type: 'bar',
-        data: { labels: labels, datasets: [{ label: 'Attack Success Rate (%)', data: succData, backgroundColor: colors, borderRadius: 6 }] },
-        options: { responsive: true, maintainAspectRatio: false, scales: commonScales, plugins: commonPlugins }
-    });
-    
-    const ctxDef = document.getElementById("chartDefenderUtility").getContext("2d");
-    if (chartDefenderUtilityInstance) chartDefenderUtilityInstance.destroy();
-    chartDefenderUtilityInstance = new Chart(ctxDef, {
-        type: 'bar',
-        data: { labels: labels, datasets: [{ label: 'Defender Utility', data: defUtilData, backgroundColor: colors, borderRadius: 6 }] },
-        options: { responsive: true, maintainAspectRatio: false, scales: commonScales, plugins: commonPlugins }
-    });
-    
-    const ctxUnpred = document.getElementById("chartUnpredictability").getContext("2d");
-    if (chartUnpredictabilityInstance) chartUnpredictabilityInstance.destroy();
-    chartUnpredictabilityInstance = new Chart(ctxUnpred, {
-        type: 'bar',
-        data: { labels: labels, datasets: [{ label: 'Normalized Entropy', data: unpredData, backgroundColor: colors, borderRadius: 6 }] },
-        options: { responsive: true, maintainAspectRatio: false, scales: { ...commonScales, y: { ...commonScales.y, max: 1.0 } }, plugins: commonPlugins }
-    });
+    swap("stackEmpty", "stackelbergResultsContainer", false);
+    swap("attackerEmpty", "attackerResultsSection", false);
+    swap("comparisonEmpty", "comparisonResult", false);
+    swap("simEmpty", "simResult", false);
+    swap("evalEmpty", "evalResultsContainer", false);
+    swap("recEmpty", "recResult", false);
+    show("recBadge", false);
+    $("btnSamplePatrol").disabled = true;
+
+    $("insightTextDetection").textContent = "Run the benchmark to see which policy detects the most attacks.";
+    $("insightTextSuccess").textContent = "Run the benchmark to see breach rates.";
+    $("insightTextUnpred").textContent = "Run the benchmark to see policy entropy.";
+
+    ["analyze", "simulate", "benchmark", "solve"].forEach((s) => stepsDone.delete(s));
+    renderPipeline("generate");
+    requestDraw();
 }
 
-// Master Action Buttons Logic
-async function handleRunFullEvaluation() {
-    btnRunFullEval.disabled = true;
-    btnRunFullEval.innerHTML = `<span class="pulse-dot"></span> Executing Mission Workflow...`;
+async function runFullPipeline() {
+    await generateStrategies();
+    await analyzeAttacker();
+    await runSimulation();
+    await runBenchmark();
+    $("insightsSection").scrollIntoView({ behavior: reducedMotion.matches ? "auto" : "smooth", block: "start" });
+    toast("Pipeline finished. The recommendation is at the bottom of the page.", "success");
+}
 
+async function refreshState() {
+    const data = await api("/dashboard/summary");
+    if (!data.has_generated_state) {
+        toast("The backend has no solved game yet. Generate routes first.", "info");
+        return;
+    }
+    await fetchBaselines();
+    if (evaluationData) renderEvaluation();
+    toast("State refreshed from the backend.", "success", 2800);
+}
+
+let resetTimer = null;
+async function resetDashboard() {
+    const btn = $("btnResetDashboard");
+    const label = btn.querySelector(".btn-label");
+    if (!btn.classList.contains("confirming")) {
+        btn.classList.add("confirming");
+        label.textContent = "Click again to reset";
+        resetTimer = setTimeout(() => { btn.classList.remove("confirming"); label.textContent = "Reset"; }, 3200);
+        return;
+    }
+    clearTimeout(resetTimer);
+    btn.classList.remove("confirming");
+    label.textContent = "Reset";
+    await api("/dashboard/reset", { method: "POST" });
+    currentStrategies = [];
+    clearSelection();
+    clearDownstream();
+    swap("strategyEmpty", "strategyResult", false);
+    $("strategyEmpty").querySelector("p").innerHTML = "<strong>No routes yet</strong>Set the shift length and generate the feasible routes. Solving starts automatically.";
+    $("fixedStrategySelect").innerHTML = "<option>Generate routes first</option>";
+    $("fixedStrategySelect").disabled = true;
+    stepsDone.clear();
+    renderPipeline("generate");
+    toast("Console reset.", "info", 2400);
+}
+
+/* ==========================================================================
+   Wiring
+   ========================================================================== */
+$("btnGenerate").addEventListener("click", (e) => guarded(e.currentTarget, "Generating", generateStrategies));
+$("btnRunStackelberg").addEventListener("click", (e) => guarded(e.currentTarget, "Solving", async () => {
+    if (!currentStrategies.length) throw new Error("Generate routes first.");
+    await solveEquilibrium();
+}));
+$("btnAnalyzeAttacker").addEventListener("click", (e) => guarded(e.currentTarget, "Analyzing", analyzeAttacker));
+$("btnRunSim").addEventListener("click", (e) => guarded(e.currentTarget, "Simulating", runSimulation));
+$("btnRunEvaluation").addEventListener("click", (e) => guarded(e.currentTarget, "Benchmarking", runBenchmark));
+$("btnRunFullEval").addEventListener("click", (e) => guarded(e.currentTarget, "Running", runFullPipeline));
+$("btnRefreshResults").addEventListener("click", (e) => guarded(e.currentTarget, "Refreshing", refreshState));
+$("btnSamplePatrol").addEventListener("click", (e) => guarded(e.currentTarget, "Sampling", samplePatrol));
+$("btnResetDashboard").addEventListener("click", () => resetDashboard().catch((err) => toast(err.message, "error")));
+$("tabRationalBtn").addEventListener("click", () => switchEvalTab("rational"));
+$("tabBoundedBtn").addEventListener("click", () => switchEvalTab("bounded"));
+
+/* Sidebar: highlight the section in view. Anchors scroll natively (smooth via CSS). */
+(function initNav() {
+    const links = document.querySelectorAll(".rail-links a[data-section]");
+    const io = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            links.forEach((l) => l.classList.toggle("active", l.dataset.section === entry.target.id));
+        });
+    }, { rootMargin: "-20% 0px -60% 0px", threshold: 0 });
+    links.forEach((l) => { const el = $(l.dataset.section); if (el) io.observe(el); });
+})();
+
+/* Reveal panels as they scroll into view (state transition, not decoration). */
+(function initReveal() {
+    const items = document.querySelectorAll(".reveal");
+    if (!("IntersectionObserver" in window)) { items.forEach((el) => el.classList.add("in")); return; }
+    const io = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            const siblings = Array.from(entry.target.parentElement.children).filter((c) => c.classList.contains("reveal"));
+            entry.target.style.setProperty("--i", siblings.indexOf(entry.target));
+            entry.target.classList.add("in");
+            io.unobserve(entry.target);
+        });
+    }, { threshold: 0.08 });
+    items.forEach((el) => io.observe(el));
+})();
+
+/* ==========================================================================
+   Init
+   ========================================================================== */
+async function init() {
+    readPalette();
+    syncThemeIcon();
+    renderPipeline("generate");
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(requestDraw);
     try {
-        // Step 1: Generate Strategies
-        await handleGenerateStrategy();
-        
-        // Step 2: Run Stackelberg Optimization
-        await solveStackelbergInternal(true);
-        
-        // Step 3: Analyze Attacker
-        await handleAnalyzeAttacker();
-        
-        // Step 4: Run Simulation
-        await handleRunSimulation();
-        
-        // Step 5: Run Multi-Experiment Evaluation
-        await handleRunEvaluation();
-
-        // Scroll smoothly to Recommendations
-        document.getElementById("recommendationSection").scrollIntoView({ behavior: "smooth" });
-
+        campusGraph = await api("/campus");
+        setBackend(true);
+        $("statLocations").textContent = campusGraph.nodes.length;
+        $("statRoutes").textContent = campusGraph.edges.length;
+        const top = campusGraph.nodes.reduce((m, n) => (n.target_value > m.target_value ? n : m), campusGraph.nodes[0]);
+        $("statHighestValue").textContent = `${top.name} (${top.target_value})`;
+        computeLayout();
+        requestDraw();
     } catch (err) {
-        console.error("Full evaluation error:", err);
-        alert("Full evaluation encountered an error. Please verify backend status.");
-    } finally {
-        btnRunFullEval.disabled = false;
-        btnRunFullEval.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Run Full Evaluation Workflow`;
+        setBackend(false);
+        toast(err.message, "error", 9000);
     }
 }
-
-async function handleRefreshResults() {
-    btnRefreshResults.disabled = true;
-    btnRefreshResults.innerHTML = `<span class="pulse-dot"></span> Refreshing...`;
-    try {
-        const res = await fetch(`${API_BASE_URL}/dashboard/summary`);
-        const data = await res.json();
-        if (data.has_generated_state) {
-            await fetchBaselines();
-            if (evaluationData) renderEvaluationDashboard();
-        } else {
-            alert("No active generated strategy state found. Click 'Generate Feasible Strategies' or 'Run Full Evaluation'.");
-        }
-    } catch (err) {
-        console.error("Refresh error:", err);
-    } finally {
-        btnRefreshResults.disabled = false;
-        btnRefreshResults.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg> Refresh State`;
-    }
-}
-
-async function handleResetDashboard() {
-    if (!confirm("Are you sure you want to reset the command console state?")) return;
-    
-    btnResetDashboard.disabled = true;
-    btnResetDashboard.innerHTML = `<span class="pulse-dot"></span> Resetting...`;
-
-    try {
-        await fetch(`${API_BASE_URL}/dashboard/reset`, { method: 'POST' });
-        
-        currentStrategies = [];
-        highlightedRoute = [];
-        currentAttackerTarget = null;
-        currentAttackerProbs = {};
-        evaluationData = null;
-
-        hudActiveRoute.textContent = "ROUTE: UNASSIGNED";
-        document.getElementById("strategyTableContainer").style.display = "none";
-        document.getElementById("placeholderGen").style.display = "block";
-        document.getElementById("placeholderGen").textContent = "Configure patrol parameters and click 'Generate Feasible Strategies'.";
-        
-        document.getElementById("stackelbergResultsContainer").style.display = "none";
-        document.getElementById("attackerResultsSection").style.display = "none";
-        document.getElementById("comparisonSection").style.display = "none";
-        document.getElementById("simResultsSection").style.display = "none";
-        document.getElementById("evalResultsContainer").style.display = "none";
-
-        document.getElementById("insightTextDetection").textContent = "Run empirical benchmark to calculate statistically verified detection metrics.";
-        document.getElementById("insightTextSuccess").textContent = "Run empirical benchmark to calculate attack breach ratios.";
-        document.getElementById("insightTextUnpred").textContent = "Run empirical benchmark to calculate policy Shannon entropy.";
-
-        document.getElementById("recStrategyTitle").textContent = "Game-Theoretic Stackelberg Patrol";
-        document.getElementById("recStrategyText").textContent = "Run Full Evaluation to determine optimal patrol recommendation.";
-
-        drawGraph();
-
-    } catch (err) {
-        console.error("Reset error:", err);
-    } finally {
-        btnResetDashboard.disabled = false;
-        btnResetDashboard.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg> Reset Console`;
-    }
-}
+init();

@@ -1,4 +1,7 @@
-from fastapi import FastAPI
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict
 
@@ -74,12 +77,20 @@ CURRENT_GAME_STATE = {
 @app.post("/api/stackelberg/solve", response_model=SolverResponseModel)
 def solve_game(req: SimulationRequestModel):
     graph = CampusGraph(req.game_config.graph)
-    probs, target_cov, attacker_best, u_d, u_a = solve_stackelberg_game(graph, req.strategies)
+
+    # Routes may arrive as node ids or display names; the solver works on ids.
+    name_to_id = {graph.get_node_data(n)["name"]: n for n in graph.get_nodes()}
+    strategies = [[name_to_id.get(n, n) for n in route] for route in req.strategies]
+    unknown = {n for route in strategies for n in route if n not in graph.graph.nodes}
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown checkpoints in strategies: {sorted(unknown)}")
+
+    probs, target_cov, attacker_best, u_d, u_a = solve_stackelberg_game(graph, strategies)
     
     # Save for Step 4 & 5
     CURRENT_GAME_STATE["graph"] = graph
     CURRENT_GAME_STATE["target_coverage"] = target_cov
-    CURRENT_GAME_STATE["strategies"] = req.strategies
+    CURRENT_GAME_STATE["strategies"] = strategies
     CURRENT_GAME_STATE["probabilities"] = probs
     
     return {
@@ -156,7 +167,8 @@ def run_sim(req: EngineSimulationRequestModel):
         patrol_policy=req.patrol_policy,
         attacker_type=req.attacker_type,
         lambda_val=req.lambda_val,
-        random_seed=req.random_seed
+        random_seed=req.random_seed,
+        fixed_id=req.fixed_id
     )
 
 def ensure_game_state():
@@ -192,7 +204,8 @@ def compare_simulations(req: EngineSimulationRequestModel):
             patrol_policy=policy,
             attacker_type=req.attacker_type,
             lambda_val=req.lambda_val,
-            random_seed=req.random_seed
+            random_seed=req.random_seed,
+            fixed_id=req.fixed_id
         )
         
     return results
@@ -210,7 +223,8 @@ def run_evaluation(req: EvaluationRunRequestModel):
         experiments=req.experiments,
         attacker_type=req.attacker_type,
         lambda_val=req.lambda_val,
-        random_seed=req.random_seed
+        random_seed=req.random_seed,
+        fixed_id=req.fixed_id
     )
 
 @app.post("/api/evaluation/compare")
@@ -225,7 +239,8 @@ def compare_evaluation(req: EvaluationCompareRequestModel):
         rounds=req.rounds,
         experiments=req.experiments,
         lambda_val=req.lambda_val,
-        random_seed=req.random_seed
+        random_seed=req.random_seed,
+        fixed_id=req.fixed_id
     )
 
 @app.get("/api/dashboard/summary")
@@ -258,3 +273,17 @@ def reset_dashboard_state():
     }
 
 
+# Serve the dashboard from the same origin so `uvicorn backend.main:app` is all that is needed.
+# Mounted last so every /api route above takes precedence.
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+class RevalidatingStaticFiles(StaticFiles):
+    """Static files that the browser must revalidate (ETag) so edits show up on reload."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+if FRONTEND_DIR.is_dir():
+    app.mount("/", RevalidatingStaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
